@@ -2130,16 +2130,12 @@ class CurveGenerator:
         x_values = []
         cap_breakpoint = self._special_breakpoint(args)
         if self.mode_name == "jump":
-            point_count = max(point_count, 120)
             x_values = self._jump_x_values(args, point_count, max_input)
         elif self.mode_name == "synchronous":
-            point_count = max(point_count, 120)
             x_values = self._synchronous_x_values(args, point_count, max_input)
         elif self.mode_name == "motivity (1.6.1)":
-            point_count = max(point_count, 120)
             x_values = self._motivity_x_values(args, point_count, max_input)
         elif self.mode_name == "natural":
-            point_count = max(point_count, 120)
             x_values = self._natural_x_values(args, point_count, max_input)
         elif self.mode_name == "power":
             x_values = self._power_x_values(args, point_count, max_input, cap_breakpoint)
