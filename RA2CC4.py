@@ -29,7 +29,7 @@ def main_menu_footer():
     print(f"\n{GRAY}Use ↑ ↓ to move | ENTER to select | Q or ESC to quit{RESET}")
 def pause_footer(action="return to menu"):
     print(f"\n{GRAY}Use ENTER or ESC to {action}{RESET}")
-POINT_TENSION = "0"
+POINT_TENSION = "0.5"
 CONFIG_KEYS = {
     "rawaccel_path",
     "point_count",
@@ -49,10 +49,10 @@ LEGACY_CONFIG_PATHS = [
 ]
 POINT_OPTIONS = [32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024, 2048, 4096]
 PRECISION_OPTIONS = list(range(1, 11))
-REDUCTION_OPTIONS = ["off", "optimal", "normal", "aggressive"]
+REDUCTION_OPTIONS = ["optimal", "normal", "aggressive"]
 RECOMMENDED_POINTS = 128
 RECOMMENDED_PRECISION = 6
-RECOMMENDED_REDUCTION = "off"
+RECOMMENDED_REDUCTION = "optimal"
 MODES = [
     ("Classic/Linear", True),
     ("Jump", True),
@@ -457,7 +457,7 @@ def advanced_settings_menu():
                 save_last_config(data)
             value_choice_selector(
                 "POINT REDUCTION MODE",
-                [("Off", "off"), ("Optimal", "optimal"), ("Normal", "normal"), ("Aggressive", "aggressive")],
+                [("Optimal", "optimal"), ("Normal", "normal"), ("Aggressive", "aggressive")],
                 current=get_output_reduction(last),
                 recommended=RECOMMENDED_REDUCTION,
                 width=70,
@@ -1780,7 +1780,7 @@ class PowerCurveGain(PowerCurveBase):
             out = self.cap_y_eff + self.ieee_divide(self.constant_b, x)
         return out
 class CurveGenerator:
-    def __init__(self, mode_name="natural", curve_type="legacy", cap_mode="out", point_reduction_mode="off"):
+    def __init__(self, mode_name="natural", curve_type="legacy", cap_mode="out", point_reduction_mode="optimal"):
         self.mode_name = mode_name.lower()
         self.curve_type = curve_type.lower()
         self.cap_mode = cap_mode.lower()
@@ -1995,31 +1995,198 @@ class CurveGenerator:
         xs[0] = 0.0
         xs[-1] = max_input
         return xs
+    def _adaptive_anchors(self, args, max_input):
+        anchors = {0.0, float(max_input)}
+        def add(value):
+            try:
+                v = float(value)
+                if math.isfinite(v) and 0.0 <= v <= max_input:
+                    anchors.add(v)
+            except Exception:
+                pass
+        if self.mode_name in ["classic/linear", "natural"]:
+            add(args.get("input_offset", 0.0))
+        if self.mode_name == "jump":
+            cap_x = float(args.get("cap_x", 15.0))
+            add(cap_x)
+            if cap_x > 0:
+                add(cap_x * 0.5)
+                add(cap_x * 0.9)
+                add(cap_x * 1.1)
+                add(cap_x * 1.5)
+        if self.mode_name == "synchronous":
+            sync_speed = float(args.get("sync_speed", 5.0))
+            add(sync_speed)
+            if sync_speed > 0:
+                add(sync_speed * 0.25)
+                add(sync_speed * 0.5)
+                add(sync_speed * 2.0)
+                add(sync_speed * 4.0)
+        if self.mode_name == "motivity (1.6.1)":
+            midpoint = float(args.get("midpoint", 5.0))
+            add(midpoint)
+            if midpoint > 0:
+                add(midpoint * 0.25)
+                add(midpoint * 0.5)
+                add(midpoint * 2.0)
+                add(midpoint * 4.0)
+        if self.mode_name == "power":
+            add(self._power_offset_breakpoint(args) or 0.0)
+        cap_breakpoint = self._special_breakpoint(args)
+        if cap_breakpoint is not None:
+            add(cap_breakpoint)
+            add(float(cap_breakpoint) * 0.98)
+            add(float(cap_breakpoint) * 1.02)
+        return sorted(anchors)
+
+    def _adaptive_effective_max_input(self, curve, max_input, precision=6):
+        max_input = max(float(max_input), 0.0)
+        if max_input <= 0:
+            return max_input
+        precision = int(precision)
+        y_tolerance = max((10.0 ** -max(precision, 1)) * 1.5, 1e-8)
+        xs = []
+        count = 96
+        for i in range(count):
+            t = i / max(1, count - 1)
+            x = max_input * (t ** 2.0)
+            xs.append(x)
+        xs = sorted(set([0.0, max_input] + xs))
+        ys = [round(float(curve(x)), precision) for x in xs]
+        last_change = 0
+        for i in range(1, len(xs)):
+            if abs(ys[i] - ys[i - 1]) > y_tolerance:
+                last_change = i
+        if last_change >= len(xs) - 4:
+            return max_input
+        candidate = xs[min(len(xs) - 1, last_change + 2)]
+        return max(candidate, max_input * 0.05)
+
+    def _adaptive_x_values(self, curve, args, point_count, max_input, precision=6, protected=None):
+        max_input = max(float(max_input), 0.0)
+        point_count = max(2, int(point_count))
+        if max_input <= 0:
+            return [0.0]
+        precision = int(precision)
+        anchors = set(self._adaptive_anchors(args, max_input))
+        if protected:
+            for x in protected:
+                try:
+                    v = float(x)
+                    if math.isfinite(v) and 0.0 <= v <= max_input:
+                        anchors.add(v)
+                except Exception:
+                    pass
+        effective_max = self._adaptive_effective_max_input(curve, max_input, precision)
+        anchors.add(effective_max)
+        if effective_max < max_input:
+            step = max((max_input - effective_max) / max(point_count, 2), max_input * 1e-6)
+            anchors.add(min(max_input, effective_max + step))
+            anchors.add(max_input)
+        dense_seed = []
+        seed_count = max(48, min(512, point_count * 4))
+        for i in range(seed_count):
+            t = i / max(1, seed_count - 1)
+            x = effective_max * (t ** 2.15)
+            dense_seed.append(x)
+        anchors.update(dense_seed)
+        anchors = sorted(set(min(max(float(x), 0.0), max_input) for x in anchors))
+        y_values = [float(curve(x)) for x in anchors]
+        y_min = min(y_values)
+        y_max = max(y_values)
+        y_scale = max(y_max - y_min, max(abs(y) for y in y_values), 1.0)
+        max_error = max((10.0 ** -max(precision, 1)) * 0.75, y_scale * 0.000015)
+        min_dx = max_input / max(4096, point_count * 32)
+        result = set()
+        result.add(0.0)
+        result.add(max_input)
+        for x in self._adaptive_anchors(args, max_input):
+            result.add(x)
+        if protected:
+            for x in protected:
+                try:
+                    result.add(float(x))
+                except Exception:
+                    pass
+        def y_at(x):
+            return float(curve(float(x)))
+        def split_segment(x0, x1, depth=0):
+            if x1 <= x0:
+                result.add(x0)
+                result.add(x1)
+                return
+            y0 = y_at(x0)
+            y1 = y_at(x1)
+            mid = (x0 + x1) * 0.5
+            ym = y_at(mid)
+            line_y = y0 + (y1 - y0) * ((mid - x0) / (x1 - x0))
+            error = abs(ym - line_y)
+            if depth >= 18 or (x1 - x0) <= min_dx or error <= max_error:
+                result.add(x0)
+                result.add(x1)
+                return
+            split_segment(x0, mid, depth + 1)
+            split_segment(mid, x1, depth + 1)
+        ordered = sorted(set([0.0, max_input, effective_max] + anchors))
+        for left, right in zip(ordered, ordered[1:]):
+            split_segment(left, right)
+        result = sorted(set(min(max(float(x), 0.0), max_input) for x in result))
+        return result
     def _remove_flat_runs(self, curve, x_values, y_tolerance=0.000001, protected=None, precision=6):
         return sorted(set(float(x) for x in x_values))
     def _collapse_flat_runs_in_output(self, points):
-        if len(points) <= 2:
+        if len(points) <= 3:
             return points
-        collapsed = []
-        run = [points[0]]
-        def y_of(point):
-            parts = str(point).split("|")
-            return parts[1] if len(parts) > 1 else ""
-        run_y = y_of(points[0])
-        for point in points[1:]:
-            y = y_of(point)
-            if y == run_y:
-                run.append(point)
-            else:
-                collapsed.append(run[0])
-                if len(run) > 1:
-                    collapsed.append(run[-1])
-                run = [point]
-                run_y = y
-        collapsed.append(run[0])
-        if len(run) > 1:
-            collapsed.append(run[-1])
-        return collapsed
+
+        output = []
+        i = 0
+
+        def parse_y(point):
+            try:
+                return float(str(point).split("|")[1])
+            except Exception:
+                return None
+
+        while i < len(points):
+            if i >= len(points) - 2:
+                output.append(points[i])
+                i += 1
+                continue
+
+            y0 = parse_y(points[i])
+            y1 = parse_y(points[i + 1])
+
+            if y0 is None or y1 is None or abs(y1 - y0) > 1e-12:
+                output.append(points[i])
+                i += 1
+                continue
+
+            run_start = i
+            run_end = i + 1
+
+            while run_end + 1 < len(points):
+                yn = parse_y(points[run_end + 1])
+                if yn is None or abs(yn - y0) > 1e-12:
+                    break
+                run_end += 1
+
+            output.append(points[run_start])
+
+            if run_start + 1 <= run_end:
+                output.append(points[run_start + 1])
+
+            if run_end > run_start + 1:
+                output.append(points[run_end])
+
+            i = run_end + 1
+
+        deduped = []
+        for point in output:
+            if not deduped or deduped[-1] != point:
+                deduped.append(point)
+
+        return deduped
+
     def _densify_x_values(self, x_values, target_count):
         base = sorted(set(float(x) for x in x_values))
         if len(base) <= 2:
@@ -2089,6 +2256,62 @@ class CurveGenerator:
                 stack.append((left, split_idx))
                 stack.append((split_idx, right))
         return [dense_x[i] for i in sorted(keep)]
+    def _flat_linear_reduce_x_values(self, curve, x_values, precision=6, protected=None, preserve_below_x=0.0):
+        x_values = sorted(set(float(x) for x in x_values))
+        if len(x_values) <= 2:
+            return x_values
+        y_values = [float(curve(x)) for x in x_values]
+        y_min = min(y_values)
+        y_max = max(y_values)
+        y_scale = max(y_max - y_min, max(abs(v) for v in y_values), 1.0)
+        tolerance = max((10.0 ** -max(int(precision), 1)) * 0.55, y_scale * 1e-9)
+        protected_values = set(round(float(x), 10) for x in (protected or []))
+        preserve_floor = max(float(preserve_below_x), 0.0)
+        protected_idx = {0, len(x_values) - 1}
+        for i, x in enumerate(x_values):
+            rx = round(float(x), 10)
+            if rx in protected_values or x <= preserve_floor:
+                protected_idx.add(i)
+        def y_key(y):
+            return f"{y:.{precision}f}"
+        i = 0
+        while i < len(x_values):
+            j = i + 1
+            key = y_key(y_values[i])
+            while j < len(x_values) and y_key(y_values[j]) == key:
+                j += 1
+            if j - i >= 2:
+                protected_idx.add(i)
+                if i + 1 < j:
+                    protected_idx.add(i + 1)
+                protected_idx.add(j - 1)
+                if i - 1 >= 0:
+                    protected_idx.add(i - 1)
+                if i - 2 >= 0:
+                    protected_idx.add(i - 2)
+            i = j
+        kept_idx = [0]
+        for i in range(1, len(x_values) - 1):
+            if i in protected_idx:
+                if kept_idx[-1] != i:
+                    kept_idx.append(i)
+                continue
+            left = kept_idx[-1]
+            right = i + 1
+            x_left = x_values[left]
+            x_mid = x_values[i]
+            x_right = x_values[right]
+            dx = x_right - x_left
+            if abs(dx) <= 1e-12:
+                kept_idx.append(i)
+                continue
+            t = (x_mid - x_left) / dx
+            expected_y = y_values[left] + (y_values[right] - y_values[left]) * t
+            if abs(y_values[i] - expected_y) > tolerance:
+                kept_idx.append(i)
+        if kept_idx[-1] != len(x_values) - 1:
+            kept_idx.append(len(x_values) - 1)
+        return [x_values[i] for i in kept_idx]
     def _apply_point_reduction(self, curve, x_values, protected=None, preserve_below_x=0.0):
         mode = self.point_reduction_mode
         if mode == "safe":
@@ -2236,9 +2459,10 @@ class CurveGenerator:
             temp_points.append(f"{x_str}|{y_str}|{POINT_TENSION}")
         return len(self._collapse_flat_runs_in_output(temp_points))
     def _resolve_mode_x_values(self, curve, x_values, point_count, precision, protected=None, preserve_below_x=0.0):
-        mode = str(self.point_reduction_mode or "off").strip().lower()
+        mode = str(self.point_reduction_mode or "optimal").strip().lower()
         if mode == "safe":
             mode = "normal"
+
         off_x_values = self._enforce_point_limit(
             curve,
             x_values,
@@ -2246,37 +2470,33 @@ class CurveGenerator:
             protected=protected,
             preserve_below_x=preserve_below_x
         )
-        if mode == "off":
-            return off_x_values
-        off_rendered_count = self._rendered_point_count(curve, off_x_values, precision)
-        optimal_x_values = self._optimize_point_positions(
+
+        optimal_x_values = self._flat_linear_reduce_x_values(
             curve,
             off_x_values,
-            target_count=len(off_x_values),
+            precision=precision,
             protected=protected,
             preserve_below_x=preserve_below_x
         )
-        while (
-            self._rendered_point_count(curve, optimal_x_values, precision) > off_rendered_count
-            and len(optimal_x_values) > 2
-        ):
-            optimal_x_values = self._enforce_point_limit(
-                curve,
-                optimal_x_values,
-                max_points=len(optimal_x_values) - 1,
-                protected=protected,
-                preserve_below_x=preserve_below_x
-            )
-        if self._rendered_point_count(curve, optimal_x_values, precision) != off_rendered_count:
-            optimal_x_values = off_x_values
+
+        optimal_x_values = self._enforce_point_limit(
+            curve,
+            optimal_x_values,
+            max_points=point_count,
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
+
         if mode == "optimal":
             return optimal_x_values
+
         reduced = self._apply_point_reduction(
             curve,
             optimal_x_values,
             protected=protected,
             preserve_below_x=preserve_below_x
         )
+
         reduced = self._enforce_point_limit(
             curve,
             reduced,
@@ -2284,8 +2504,10 @@ class CurveGenerator:
             protected=protected,
             preserve_below_x=preserve_below_x
         )
+
         if len(reduced) > len(optimal_x_values):
             return optimal_x_values
+
         return reduced
     def _enforce_point_limit(self, curve, x_values, max_points, protected=None, preserve_below_x=0.0):
         x_values = sorted(set(float(x) for x in x_values))
@@ -2429,13 +2651,22 @@ class CurveGenerator:
             protected.add(float(args.get("midpoint", 5.0)))
         if cap_breakpoint is not None:
             protected.add(float(cap_breakpoint))
+        adaptive_values = self._adaptive_x_values(
+                curve,
+                args,
+                point_count=max(point_count, len(x_values)),
+                max_input=max_input,
+                precision=precision,
+                protected=protected
+            )
+        x_values = sorted(set(float(x) for x in x_values + adaptive_values))
         x_values = self._remove_flat_runs(
-            curve,
-            x_values,
-            y_tolerance=0.000001,
-            protected=protected,
-            precision=precision
-        )
+                curve,
+                x_values,
+                y_tolerance=0.000001,
+                protected=protected,
+                precision=precision
+            )
         preserve_below_x = 0.0
         if self.mode_name == "power":
             preserve_below_x = max_input * 0.25
