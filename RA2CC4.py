@@ -1678,7 +1678,7 @@ class PowerCurveBase:
     def __init__(self, output_offset, scale, exponent_power, cap_mode, cap_x, cap_y, gain_curve):
         self.power = max(float(Fraction(exponent_power).limit_denominator(10000)), 1e-12)
         self.output_offset = float(Fraction(output_offset).limit_denominator(10000))
-        self.scale = max(float(Fraction(scale).limit_denominator(10000)), 1e-12)
+        self.scale = float(Fraction(scale).limit_denominator(10000))
         self.offset_x = 0.0
         self.offset_y = self.output_offset
         self.constant = 0.0
@@ -1702,25 +1702,31 @@ class PowerCurveBase:
     @staticmethod
     def integration_constant(input_val, gain, output):
         return (output - gain) * input_val
+    @staticmethod
+    def ieee_divide(numerator, denominator):
+        # Match C++ double division semantics without Python ZeroDivisionError.
+        if denominator != 0:
+            return numerator / denominator
+        if numerator == 0:
+            return float("nan")
+        return math.copysign(float("inf"), numerator)
     def _setup_parameters(self):
         if self.cap_mode != "io":
-            pass
+            self.scale = self.scale
         elif self.gain_curve:
-            if self.cap_x > 0 and self.cap_y > 0:
-                self.scale = self.scale_from_gain_point(self.cap_x, self.cap_y, self.power)
+            self.scale = self.scale_from_gain_point(self.cap_x, self.cap_y, self.power)
         else:
-            if self.cap_x > 0 and self.cap_y > 0:
-                self.offset_x = 0.0
-                self.constant = 0.0
-                self.scale = self.scale_from_output_point(
-                    self.cap_x,
-                    max(self.cap_y, 1e-12),
-                    self.power,
-                    self.constant
-                )
-                self.offset_y = 0.0
-                return
-        self.offset_x = self.gain_inverse(max(self.output_offset, 0.0), self.power, self.scale) if self.output_offset > 0 else 0.0
+            self.offset_x = 0.0
+            self.offset_y = 0.0
+            self.constant = 0.0
+            self.scale = self.scale_from_output_point(
+                self.cap_x,
+                self.cap_y,
+                self.power,
+                self.constant
+            )
+            return
+        self.offset_x = self.gain_inverse(self.output_offset, self.power, self.scale)
         self.offset_y = self.output_offset
         self.constant = self.offset_x * self.offset_y * self.power / (self.power + 1.0)
     def base_fn(self, x):
@@ -1763,13 +1769,12 @@ class PowerCurveGain(PowerCurveBase):
             if self.cap_y > 0:
                 self.cap_x_eff = self.gain_inverse(self.cap_y, self.power, self.scale)
                 self.cap_y_eff = self.cap_y
-        if math.isfinite(self.cap_x_eff) and math.isfinite(self.cap_y_eff) and self.cap_x_eff > 0:
-            self.constant_b = self.integration_constant(self.cap_x_eff, self.cap_y_eff, self.base_fn(self.cap_x_eff))
+        self.constant_b = self.integration_constant(self.cap_x_eff, self.cap_y_eff, self.base_fn(self.cap_x_eff))
     def __call__(self, x):
         if x < self.cap_x_eff:
             out = self.base_fn(x)
         else:
-            out = self.cap_y_eff + (self.constant_b / x if x > 0 else 0.0)
+            out = self.cap_y_eff + self.ieee_divide(self.constant_b, x)
         return out
 class CurveGenerator:
     def __init__(self, mode_name="natural", curve_type="legacy", cap_mode="out", point_reduction_mode="off"):
@@ -1847,11 +1852,23 @@ class CurveGenerator:
     def _power_offset_breakpoint(self, args):
         if self.mode_name != "power":
             return None
+        cap_x = float(args.get("cap_x", 0.0))
+        cap_y = float(args.get("cap_y", 0.0))
         output_offset = float(args.get("output_offset", 0.0))
+        p = max(float(args.get("exponent_power", 0.05)), 1e-12)
+        s = float(args.get("scale", 1.0))
+
+        # Raw Accel special case: legacy + io ignores output_offset and forces offset to zero.
+        if self.cap_mode == "io" and self.curve_type == "legacy":
+            return 0.0
+
+        # Raw Accel special case: gain + io computes scale from the io cap point.
+        if self.cap_mode == "io" and self.curve_type == "gain":
+            if cap_x > 0:
+                s = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, p)
+
         if output_offset <= 0:
             return 0.0
-        p = max(float(args.get("exponent_power", 0.05)), 1e-12)
-        s = max(float(args.get("scale", 1.0)), 1e-12)
         return math.pow(output_offset / (p + 1.0), 1.0 / p) / s
     def _special_breakpoint(self, args):
         classic_bp = self._classic_gain_cap_breakpoint(args)
@@ -2223,7 +2240,7 @@ class CurveGenerator:
         )
         profile_id = str(uuid.uuid4())
         allow_non_zero_left = self.mode_name in ["power", "lut"]
-        left_slope_mode = "Flat" if self.mode_name == "lut" else "Linear"
+        left_slope_mode = "Flat" if self.mode_name in ["power", "lut"] else "Linear"
         base_profile = {
             "Id": profile_id,
             "Name": profile_name,
@@ -2363,8 +2380,15 @@ def estimate_default_max_input(mode, curve_type, cap_mode, args):
         output_offset = max(float(args.get("output_offset", 0.0)), 0.0)
         cap_x = args.get("cap_x", 0.0)
         cap_y = args.get("cap_y", 0.0)
-        scale = max(float(args.get("scale", 1.0)), 1e-12)
+        scale = float(args.get("scale", 1.0))
         exponent_power = max(float(args.get("exponent_power", 0.05)), 1e-12)
+
+        if cap_mode == "io":
+            if curve_type == "legacy":
+                output_offset = 0.0
+            elif curve_type == "gain" and cap_x > 0:
+                scale = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, exponent_power)
+
         offset_x = math.pow(output_offset / (exponent_power + 1.0), 1.0 / exponent_power) / scale if output_offset > 0 else 0.0
         power_base = max(120.0, offset_x * 2.5)
         if cap_mode in ["in", "io"] and cap_x > 0:
