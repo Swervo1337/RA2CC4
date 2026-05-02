@@ -54,7 +54,7 @@ Convert RawAccel configurations into CustomCurve (.cc4) profiles using a fast, i
 Download and run:
 
 ```
-RawAccel-CC4-Converter.exe
+RA2CC4.exe
 ```
 
 ---
@@ -64,7 +64,7 @@ RawAccel-CC4-Converter.exe
 No external dependencies required.
 
 ```
-python Curvegen.py
+python RA2CC4.py
 ```
 
 ---
