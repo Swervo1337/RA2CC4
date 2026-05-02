@@ -49,7 +49,7 @@ LEGACY_CONFIG_PATHS = [
 ]
 POINT_OPTIONS = [32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024, 2048, 4096]
 PRECISION_OPTIONS = list(range(1, 11))
-REDUCTION_OPTIONS = ["off", "safe", "aggressive"]
+REDUCTION_OPTIONS = ["off", "optimal", "normal", "aggressive"]
 RECOMMENDED_POINTS = 128
 RECOMMENDED_PRECISION = 6
 RECOMMENDED_REDUCTION = "off"
@@ -364,6 +364,8 @@ def get_output_precision(config=None):
 def get_output_reduction(config=None):
     data = config if isinstance(config, dict) else load_last_config()
     value = str(data.get("point_reduction_mode", RECOMMENDED_REDUCTION)).strip().lower()
+    if value == "safe":
+        value = "normal"
     return value if value in REDUCTION_OPTIONS else RECOMMENDED_REDUCTION
 def output_settings_note(config=None):
     return None
@@ -455,7 +457,7 @@ def advanced_settings_menu():
                 save_last_config(data)
             value_choice_selector(
                 "POINT REDUCTION MODE",
-                [("Off", "off"), ("Safe", "safe"), ("Aggressive", "aggressive")],
+                [("Off", "off"), ("Optimal", "optimal"), ("Normal", "normal"), ("Aggressive", "aggressive")],
                 current=get_output_reduction(last),
                 recommended=RECOMMENDED_REDUCTION,
                 width=70,
@@ -1051,6 +1053,8 @@ def normalize_config_values(data):
         RECOMMENDED_PRECISION
     )
     reduction = str(data.get("point_reduction_mode", RECOMMENDED_REDUCTION)).strip().lower()
+    if reduction == "safe":
+        reduction = "normal"
     cleaned["point_reduction_mode"] = reduction if reduction in REDUCTION_OPTIONS else RECOMMENDED_REDUCTION
     cleaned["rawaccel_path"] = str(data.get("rawaccel_path", "")).strip()
     return cleaned
@@ -1861,7 +1865,6 @@ class CurveGenerator:
         if self.cap_mode == "io" and self.curve_type == "gain":
             if cap_x > 0:
                 s = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, p)
-
         if output_offset <= 0:
             return 0.0
         return math.pow(output_offset / (p + 1.0), 1.0 / p) / s
@@ -2017,67 +2020,319 @@ class CurveGenerator:
         if len(run) > 1:
             collapsed.append(run[-1])
         return collapsed
-    def _remove_same_direction_runs(
+    def _densify_x_values(self, x_values, target_count):
+        base = sorted(set(float(x) for x in x_values))
+        if len(base) <= 2:
+            return base
+        segments = max(len(base) - 1, 1)
+        target = max(int(target_count), len(base))
+        per_segment = max(3, int(math.ceil(target / segments)))
+        dense = []
+        for idx in range(segments):
+            a = base[idx]
+            b = base[idx + 1]
+            if b <= a:
+                continue
+            for i in range(per_segment):
+                t = i / max(1, per_segment - 1)
+                dense.append(a + (b - a) * t)
+        dense.append(base[-1])
+        return sorted(set(dense))
+    def _simplify_sampled_curve(
         self,
-        curve,
-        x_values,
+        dense_x,
+        dense_y,
         protected=None,
         preserve_below_x=0.0,
-        slope_rel_tolerance=0.0002,
-        slope_abs_tolerance=1e-9,
-        max_midpoint_error=0.00005
+        max_error=0.00008,
+        max_span_ratio=0.12
     ):
-        protected = set(round(float(x), 10) for x in (protected or []))
+        if len(dense_x) <= 2:
+            return dense_x
+        x_domain = max(dense_x[-1] - dense_x[0], 1e-9)
+        protected_x = set(round(float(x), 10) for x in (protected or []))
+        keep = {0, len(dense_x) - 1}
+        for i, x in enumerate(dense_x):
+            if round(float(x), 10) in protected_x:
+                keep.add(i)
+        stack = [(0, len(dense_x) - 1)]
+        while stack:
+            left, right = stack.pop()
+            if right - left <= 1:
+                continue
+            protected_inside = [i for i in range(left + 1, right) if i in keep]
+            if protected_inside:
+                mid_target = (left + right) / 2.0
+                mid = min(protected_inside, key=lambda i: abs(i - mid_target))
+                stack.append((left, mid))
+                stack.append((mid, right))
+                continue
+            x_left = dense_x[left]
+            x_right = dense_x[right]
+            y_left = dense_y[left]
+            y_right = dense_y[right]
+            dx = x_right - x_left
+            if abs(dx) <= 1e-12:
+                continue
+            max_err = -1.0
+            split_idx = None
+            for i in range(left + 1, right):
+                t = (dense_x[i] - x_left) / dx
+                y_interp = y_left + (y_right - y_left) * t
+                err = abs(dense_y[i] - y_interp)
+                if err > max_err:
+                    max_err = err
+                    split_idx = i
+            span_too_large = (x_right - x_left) > max(float(max_span_ratio), 0.0) * x_domain
+            if split_idx is not None and (max_err > max_error or span_too_large):
+                keep.add(split_idx)
+                stack.append((left, split_idx))
+                stack.append((split_idx, right))
+        return [dense_x[i] for i in sorted(keep)]
+    def _apply_point_reduction(self, curve, x_values, protected=None, preserve_below_x=0.0):
+        mode = self.point_reduction_mode
+        if mode == "safe":
+            mode = "normal"
+        x_values = sorted(set(float(x) for x in x_values))
+        if mode not in ["normal", "aggressive"] or len(x_values) <= 2:
+            return x_values
+        protected_values = set(float(x) for x in (protected or []))
+        if preserve_below_x > 0:
+            protected_values.add(float(preserve_below_x))
+        y_values = [curve(x) for x in x_values]
+        y_min = min(y_values)
+        y_max = max(y_values)
+        y_scale = max(y_max - y_min, max(abs(v) for v in y_values), 1.0)
+        def reduce_with_profile(max_error_factor, max_span_ratio, target_count):
+            dense_x = self._densify_x_values(x_values, target_count=target_count)
+            dense_y = [curve(x) for x in dense_x]
+            reduced = self._simplify_sampled_curve(
+                dense_x,
+                dense_y,
+                protected=protected_values,
+                preserve_below_x=preserve_below_x,
+                max_error=max_error_factor * y_scale,
+                max_span_ratio=max_span_ratio
+            )
+            if len(reduced) >= len(x_values):
+                return x_values
+            return reduced
+        normal_reduced = reduce_with_profile(
+            max_error_factor=0.00022,
+            max_span_ratio=0.22,
+            target_count=max(640, len(x_values) * 4)
+        )
+        if mode == "normal":
+            return normal_reduced
+        aggressive_reduced = reduce_with_profile(
+            max_error_factor=0.00045,
+            max_span_ratio=0.32,
+            target_count=max(512, len(x_values) * 3)
+        )
+        return aggressive_reduced if len(aggressive_reduced) <= len(normal_reduced) else normal_reduced
+    def _optimize_point_positions(self, curve, x_values, target_count, protected=None, preserve_below_x=0.0):
         x_values = sorted(set(float(x) for x in x_values))
         if len(x_values) <= 2:
             return x_values
-        y_cache = {}
-        def y_of(x):
-            rx = round(float(x), 12)
-            if rx not in y_cache:
-                y_cache[rx] = curve(float(x))
-            return y_cache[rx]
-        def slope(a, b):
-            dx = b - a
+        target_count = max(2, int(target_count))
+        if target_count >= len(x_values):
+            target_count = len(x_values)
+        protected_values = set(round(float(x), 10) for x in (protected or []))
+        keep_seed = [x_values[0], x_values[-1]]
+        if preserve_below_x > 0:
+            keep_seed.append(float(preserve_below_x))
+        for x in x_values:
+            if round(float(x), 10) in protected_values:
+                keep_seed.append(float(x))
+        keep_seed = sorted(set(keep_seed))
+        keep_seed = self._enforce_point_limit(
+            curve,
+            keep_seed,
+            max_points=target_count,
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
+        if len(keep_seed) >= target_count:
+            return keep_seed
+        dense_x = self._densify_x_values(x_values, target_count=max(1536, len(x_values) * 10))
+        dense_y = [curve(x) for x in dense_x]
+        def nearest_dense_index(x):
+            best_idx = 0
+            best_dist = abs(dense_x[0] - x)
+            for i in range(1, len(dense_x)):
+                d = abs(dense_x[i] - x)
+                if d < best_dist:
+                    best_dist = d
+                    best_idx = i
+            return best_idx
+        keep_idx = set(nearest_dense_index(x) for x in keep_seed)
+        keep_idx.add(0)
+        keep_idx.add(len(dense_x) - 1)
+        def segment_best_split(i0, i1):
+            if i1 - i0 <= 1:
+                return (None, -1.0)
+            x0 = dense_x[i0]
+            x1 = dense_x[i1]
+            y0 = dense_y[i0]
+            y1 = dense_y[i1]
+            dx = x1 - x0
             if abs(dx) <= 1e-12:
-                return 0.0
-            return (y_of(b) - y_of(a)) / dx
-        def direction(s):
-            if s > slope_abs_tolerance:
-                return 1
-            if s < -slope_abs_tolerance:
-                return -1
-            return 0
-        reduced = [x_values[0], x_values[1]]
-        for x in x_values[2:]:
-            a = reduced[-2]
-            b = reduced[-1]
-            c = x
-            b_protected = round(float(b), 10) in protected
-            b_preserved = b <= max(float(preserve_below_x), 0.0)
-            s1 = slope(a, b)
-            s2 = slope(b, c)
-            d1 = direction(s1)
-            d2 = direction(s2)
-            close_slopes = abs(s2 - s1) <= max(
-                slope_abs_tolerance,
-                slope_rel_tolerance * max(abs(s1), abs(s2), 1.0)
+                return (None, -1.0)
+            best_i = None
+            best_err = -1.0
+            for i in range(i0 + 1, i1):
+                if i in keep_idx:
+                    continue
+                t = (dense_x[i] - x0) / dx
+                y_line = y0 + (y1 - y0) * t
+                err = abs(dense_y[i] - y_line)
+                if err > best_err:
+                    best_err = err
+                    best_i = i
+            return (best_i, best_err)
+        while len(keep_idx) < target_count:
+            ordered = sorted(keep_idx)
+            best = None
+            for left, right in zip(ordered, ordered[1:]):
+                split_i, split_err = segment_best_split(left, right)
+                if split_i is None:
+                    continue
+                if best is None or split_err > best[0]:
+                    best = (split_err, split_i)
+            if best is None:
+                break
+            keep_idx.add(best[1])
+        if len(keep_idx) < target_count:
+            ordered = sorted(keep_idx)
+            while len(keep_idx) < target_count:
+                best_mid = None
+                best_span = -1.0
+                ordered = sorted(keep_idx)
+                for left, right in zip(ordered, ordered[1:]):
+                    if right - left <= 1:
+                        continue
+                    span = dense_x[right] - dense_x[left]
+                    if span > best_span:
+                        best_span = span
+                        best_mid = (left + right) // 2
+                if best_mid is None:
+                    break
+                keep_idx.add(best_mid)
+        optimized = sorted(dense_x[i] for i in keep_idx)
+        optimized = self._enforce_point_limit(
+            curve,
+            optimized,
+            max_points=target_count,
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
+        return optimized
+    def _rendered_point_count(self, curve, x_values, precision):
+        temp_points = []
+        for x in sorted(set(float(v) for v in x_values)):
+            y = curve(x)
+            x_str = f"{x:.{precision}f}".rstrip('0').rstrip('.')
+            y_str = f"{y:.{precision}f}".rstrip('0').rstrip('.')
+            temp_points.append(f"{x_str}|{y_str}|{POINT_TENSION}")
+        return len(self._collapse_flat_runs_in_output(temp_points))
+    def _resolve_mode_x_values(self, curve, x_values, point_count, precision, protected=None, preserve_below_x=0.0):
+        mode = str(self.point_reduction_mode or "off").strip().lower()
+        if mode == "safe":
+            mode = "normal"
+        off_x_values = self._enforce_point_limit(
+            curve,
+            x_values,
+            max_points=point_count,
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
+        if mode == "off":
+            return off_x_values
+        off_rendered_count = self._rendered_point_count(curve, off_x_values, precision)
+        optimal_x_values = self._optimize_point_positions(
+            curve,
+            off_x_values,
+            target_count=len(off_x_values),
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
+        while (
+            self._rendered_point_count(curve, optimal_x_values, precision) > off_rendered_count
+            and len(optimal_x_values) > 2
+        ):
+            optimal_x_values = self._enforce_point_limit(
+                curve,
+                optimal_x_values,
+                max_points=len(optimal_x_values) - 1,
+                protected=protected,
+                preserve_below_x=preserve_below_x
             )
-            same_direction = d1 == d2
-            both_flat = d1 == 0 and d2 == 0
-            y_a = y_of(a)
-            y_b = y_of(b)
-            y_c = y_of(c)
-            t = 0.0 if abs(c - a) <= 1e-12 else (b - a) / (c - a)
-            y_interp = y_a + (y_c - y_a) * t
-            mid_err = abs(y_b - y_interp)
-            allowed_err = max(max_midpoint_error, 0.00005 * max(abs(y_b), 1.0))
-            near_collinear = mid_err <= allowed_err
-            if not b_protected and not b_preserved and near_collinear and ((same_direction and close_slopes) or both_flat):
-                reduced[-1] = c
-            else:
-                reduced.append(c)
+        if self._rendered_point_count(curve, optimal_x_values, precision) != off_rendered_count:
+            optimal_x_values = off_x_values
+        if mode == "optimal":
+            return optimal_x_values
+        reduced = self._apply_point_reduction(
+            curve,
+            optimal_x_values,
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
+        reduced = self._enforce_point_limit(
+            curve,
+            reduced,
+            max_points=point_count,
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
+        if len(reduced) > len(optimal_x_values):
+            return optimal_x_values
         return reduced
+    def _enforce_point_limit(self, curve, x_values, max_points, protected=None, preserve_below_x=0.0):
+        x_values = sorted(set(float(x) for x in x_values))
+        max_points = max(2, int(max_points))
+        if len(x_values) <= max_points:
+            return x_values
+        protected_values = set(round(float(x), 10) for x in (protected or []))
+        preserve_floor = max(float(preserve_below_x), 0.0)
+        keep = []
+        for x in x_values:
+            rx = round(float(x), 10)
+            if rx in protected_values or x <= preserve_floor or x in (x_values[0], x_values[-1]):
+                keep.append(x)
+        keep = sorted(set(keep))
+        if len(keep) >= max_points:
+            trimmed = [keep[0]]
+            interior = [x for x in keep[1:-1]]
+            slots = max_points - 2
+            if slots > 0 and interior:
+                step = len(interior) / slots
+                for i in range(slots):
+                    trimmed.append(interior[min(int(i * step), len(interior) - 1)])
+            trimmed.append(keep[-1])
+            return sorted(set(trimmed))
+        low = 0.0
+        y_values = [curve(x) for x in x_values]
+        y_scale = max((max(y_values) - min(y_values)), max(abs(v) for v in y_values), 1.0)
+        high = 0.01 * y_scale
+        best = x_values
+        for _ in range(24):
+            mid = (low + high) * 0.5
+            candidate = self._simplify_sampled_curve(
+                x_values,
+                [curve(x) for x in x_values],
+                protected=protected,
+                preserve_below_x=preserve_below_x,
+                max_error=mid,
+                max_span_ratio=1.0
+            )
+            if len(candidate) <= max_points:
+                best = candidate
+                high = mid
+            else:
+                low = mid
+        if len(best) > max_points:
+            best = best[:max_points - 1] + [best[-1]]
+        return sorted(set(best))
     def _natural_x_values(self, args, point_count, max_input):
         offset = max(0.0, float(args.get("input_offset", 0.0)))
         if point_count <= 1:
@@ -2098,7 +2353,19 @@ class CurveGenerator:
             if lut_points:
                 velocity = bool(args.get("lut_velocity", True))
                 if not velocity:
-                    for x, y in lut_points:
+                    x_values = sorted(set(float(x) for x, _ in lut_points))
+                    protected = set()
+                    if x_values:
+                        protected.update({x_values[0], x_values[-1]})
+                    x_values = self._resolve_mode_x_values(
+                        curve,
+                        x_values,
+                        point_count=point_count,
+                        precision=precision,
+                        protected=protected
+                    )
+                    for x in x_values:
+                        y = curve(x)
                         x_str = f"{float(x):.{precision}f}".rstrip('0').rstrip('.')
                         y_str = f"{float(y):.{precision}f}".rstrip('0').rstrip('.')
                         points.append(f"{x_str}|{y_str}|{POINT_TENSION}")
@@ -2119,6 +2386,16 @@ class CurveGenerator:
                         sampled_x.append(float(x))
                 sampled_x.append(float(lut_points[-1][0]))
                 sampled_x = sorted(set(sampled_x))
+                protected = set(float(x) for x, _ in lut_points)
+                if sampled_x:
+                    protected.update({sampled_x[0], sampled_x[-1]})
+                sampled_x = self._resolve_mode_x_values(
+                    curve,
+                    sampled_x,
+                    point_count=point_count,
+                    precision=precision,
+                    protected=protected
+                )
                 for x in sampled_x:
                     y = curve(x)
                     x_str = f"{x:.{precision}f}".rstrip('0').rstrip('.')
@@ -2162,22 +2439,14 @@ class CurveGenerator:
         preserve_below_x = 0.0
         if self.mode_name == "power":
             preserve_below_x = max_input * 0.25
-        if self.point_reduction_mode == "safe" and self.mode_name == "classic/linear":
-            x_values = self._remove_same_direction_runs(
-                curve,
-                x_values,
-                protected=protected,
-                preserve_below_x=preserve_below_x
-            )
-        elif self.point_reduction_mode == "aggressive":
-            x_values = self._remove_same_direction_runs(
-                curve,
-                x_values,
-                protected=protected,
-                preserve_below_x=preserve_below_x,
-                slope_rel_tolerance=0.001,
-                max_midpoint_error=0.00015
-            )
+        x_values = self._resolve_mode_x_values(
+            curve,
+            x_values,
+            point_count=point_count,
+            precision=precision,
+            protected=protected,
+            preserve_below_x=preserve_below_x
+        )
         if self.mode_name == "power" and x_values:
             x_values = [x for x in x_values if x > 1e-12]
             if not x_values:
@@ -2370,13 +2639,11 @@ def estimate_default_max_input(mode, curve_type, cap_mode, args):
         cap_y = args.get("cap_y", 0.0)
         scale = float(args.get("scale", 1.0))
         exponent_power = max(float(args.get("exponent_power", 0.05)), 1e-12)
-
         if cap_mode == "io":
             if curve_type == "legacy":
                 output_offset = 0.0
             elif curve_type == "gain" and cap_x > 0:
                 scale = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, exponent_power)
-
         offset_x = math.pow(output_offset / (exponent_power + 1.0), 1.0 / exponent_power) / scale if output_offset > 0 else 0.0
         power_base = max(120.0, offset_x * 2.5)
         if cap_mode in ["in", "io"] and cap_x > 0:
