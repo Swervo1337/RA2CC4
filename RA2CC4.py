@@ -1704,7 +1704,6 @@ class PowerCurveBase:
         return (output - gain) * input_val
     @staticmethod
     def ieee_divide(numerator, denominator):
-        # Match C++ double division semantics without Python ZeroDivisionError.
         if denominator != 0:
             return numerator / denominator
         if numerator == 0:
@@ -1857,12 +1856,8 @@ class CurveGenerator:
         output_offset = float(args.get("output_offset", 0.0))
         p = max(float(args.get("exponent_power", 0.05)), 1e-12)
         s = float(args.get("scale", 1.0))
-
-        # Raw Accel special case: legacy + io ignores output_offset and forces offset to zero.
         if self.cap_mode == "io" and self.curve_type == "legacy":
             return 0.0
-
-        # Raw Accel special case: gain + io computes scale from the io cap point.
         if self.cap_mode == "io" and self.curve_type == "gain":
             if cap_x > 0:
                 s = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, p)
