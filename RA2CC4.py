@@ -2142,7 +2142,6 @@ class CurveGenerator:
             point_count = max(point_count, 120)
             x_values = self._natural_x_values(args, point_count, max_input)
         elif self.mode_name == "power":
-            point_count = max(point_count, 120)
             x_values = self._power_x_values(args, point_count, max_input, cap_breakpoint)
         else:
             x_values = self._breakpoint_aware_x_values(point_count, max_input, cap_breakpoint)
