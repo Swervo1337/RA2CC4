@@ -1992,33 +1992,31 @@ class CurveGenerator:
         xs[0] = 0.0
         xs[-1] = max_input
         return xs
-    def _remove_flat_runs(self, curve, x_values, y_tolerance=0.000001, protected=None):
-        protected = set(round(float(x), 10) for x in (protected or []))
-        x_values = sorted(set(float(x) for x in x_values))
-        if len(x_values) <= 2:
-            return x_values
-        cleaned = []
-        run_start = x_values[0]
-        run_last = x_values[0]
-        run_y = curve(run_start)
-        for x in x_values[1:]:
-            y = curve(x)
-            is_protected = round(x, 10) in protected
-            if abs(y - run_y) <= y_tolerance and not is_protected:
-                run_last = x
-                continue
-            cleaned.append(run_start)
-            if run_last != run_start:
-                cleaned.append(run_last)
-            if is_protected:
-                cleaned.append(x)
-            run_start = x
-            run_last = x
-            run_y = y
-        cleaned.append(run_start)
-        if run_last != run_start:
-            cleaned.append(run_last)
-        return sorted(set(cleaned))
+    def _remove_flat_runs(self, curve, x_values, y_tolerance=0.000001, protected=None, precision=6):
+        return sorted(set(float(x) for x in x_values))
+    def _collapse_flat_runs_in_output(self, points):
+        if len(points) <= 2:
+            return points
+        collapsed = []
+        run = [points[0]]
+        def y_of(point):
+            parts = str(point).split("|")
+            return parts[1] if len(parts) > 1 else ""
+        run_y = y_of(points[0])
+        for point in points[1:]:
+            y = y_of(point)
+            if y == run_y:
+                run.append(point)
+            else:
+                collapsed.append(run[0])
+                if len(run) > 1:
+                    collapsed.append(run[-1])
+                run = [point]
+                run_y = y
+        collapsed.append(run[0])
+        if len(run) > 1:
+            collapsed.append(run[-1])
+        return collapsed
     def _remove_same_direction_runs(
         self,
         curve,
@@ -2154,13 +2152,13 @@ class CurveGenerator:
             protected.add(float(args.get("midpoint", 5.0)))
         if cap_breakpoint is not None:
             protected.add(float(cap_breakpoint))
-        if self.mode_name not in ["synchronous", "motivity (1.6.1)"]:
-            x_values = self._remove_flat_runs(
-                curve,
-                x_values,
-                y_tolerance=0.000001,
-                protected=protected
-            )
+        x_values = self._remove_flat_runs(
+            curve,
+            x_values,
+            y_tolerance=0.000001,
+            protected=protected,
+            precision=precision
+        )
         preserve_below_x = 0.0
         if self.mode_name == "power":
             preserve_below_x = max_input * 0.25
@@ -2189,7 +2187,7 @@ class CurveGenerator:
             x_str = f"{x:.{precision}f}".rstrip('0').rstrip('.')
             y_str = f"{y:.{precision}f}".rstrip('0').rstrip('.')
             points.append(f"{x_str}|{y_str}|{POINT_TENSION}")
-        return points
+        return self._collapse_flat_runs_in_output(points)
     def estimate_right_slope(self, args, max_input):
         curve = self._build_curve(args)
         x = max(float(max_input), 0.0)
