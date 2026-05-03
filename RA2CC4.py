@@ -1,5 +1,6 @@
 import json
 import math
+import heapq
 import uuid
 import os
 import msvcrt
@@ -2610,65 +2611,68 @@ class CurveGenerator:
             preserve_below_x=preserve_below_x
         )
 
+    def _best_priority_split(self, x_values, y_values, left, right):
+        if right - left <= 1:
+            return None
+        x_left = x_values[left]
+        x_right = x_values[right]
+        y_left = y_values[left]
+        y_right = y_values[right]
+        dx = x_right - x_left
+        if abs(dx) <= 1e-12:
+            return None
+        best_error = -1.0
+        best_index = None
+        for i in range(left + 1, right):
+            t = (x_values[i] - x_left) / dx
+            expected = y_left + (y_right - y_left) * t
+            error = abs(y_values[i] - expected)
+            if error > best_error:
+                best_error = error
+                best_index = i
+        if best_index is None or best_error <= 1e-15:
+            return None
+        return best_error, x_right - x_left, best_index
+
+    def _push_priority_segment(self, heap, x_values, y_values, left, right):
+        split = self._best_priority_split(x_values, y_values, left, right)
+        if split is None:
+            return
+        error, span, split_index = split
+        heapq.heappush(heap, (-error, -span, left, right, split_index))
+
     def _enforce_point_limit(self, curve, x_values, max_points, protected=None, preserve_below_x=0.0):
         x_values = sorted(set(float(x) for x in x_values))
         max_points = max(2, int(max_points))
         if len(x_values) <= max_points:
             return x_values
         protected_values = set(round(float(x), 10) for x in (protected or []))
-        preserve_floor = max(float(preserve_below_x), 0.0)
-        hard_keep = []
-        preferred_keep = []
-        for x in x_values:
+        hard_keep_indices = {0, len(x_values) - 1}
+        for index, x in enumerate(x_values):
             rx = round(float(x), 10)
-            if rx in protected_values or x in (x_values[0], x_values[-1]):
-                hard_keep.append(x)
-            elif preserve_floor > 0 and x <= preserve_floor:
-                preferred_keep.append(x)
-        hard_keep = sorted(set(hard_keep))
-        if len(hard_keep) >= max_points:
-            trimmed = [hard_keep[0]]
-            interior = [x for x in hard_keep[1:-1]]
-            slots = max_points - 2
-            if slots > 0 and interior:
-                step = len(interior) / slots
-                for i in range(slots):
-                    trimmed.append(interior[min(int(i * step), len(interior) - 1)])
-            trimmed.append(hard_keep[-1])
-            return sorted(set(trimmed))
-        keep = list(hard_keep)
-        if preferred_keep:
-            available_slots = max_points - len(keep)
-            preferred_slots = min(available_slots, max(2, int(round(max_points * 0.35))))
-            if preferred_slots >= len(preferred_keep):
-                keep.extend(preferred_keep)
-            elif preferred_slots > 0:
-                step = (len(preferred_keep) - 1) / max(1, preferred_slots - 1)
-                for i in range(preferred_slots):
-                    keep.append(preferred_keep[min(int(round(i * step)), len(preferred_keep) - 1)])
-        keep = sorted(set(keep))
-        low = 0.0
-        y_values = [curve(x) for x in x_values]
-        y_scale = max((max(y_values) - min(y_values)), max(abs(v) for v in y_values), 1.0)
-        high = 0.01 * y_scale
-        best = x_values
-        for _ in range(24):
-            mid = (low + high) * 0.5
-            candidate = self._simplify_sampled_curve(
-                x_values,
-                [curve(x) for x in x_values],
-                protected=protected,
-                max_error=mid,
-                max_span_ratio=1.0
-            )
-            if len(candidate) <= max_points:
-                best = candidate
-                high = mid
-            else:
-                low = mid
-        if len(best) > max_points:
-            best = best[:max_points - 1] + [best[-1]]
-        return sorted(set(best))
+            if rx in protected_values:
+                hard_keep_indices.add(index)
+        if len(hard_keep_indices) >= max_points:
+            return [x_values[i] for i in sorted(hard_keep_indices)]
+
+        y_values = [float(curve(x)) for x in x_values]
+        keep_indices = set(hard_keep_indices)
+        heap = []
+        ordered_keep = sorted(keep_indices)
+        for left, right in zip(ordered_keep, ordered_keep[1:]):
+            self._push_priority_segment(heap, x_values, y_values, left, right)
+
+        while len(keep_indices) < max_points and heap:
+            _, _, left, right, split_index = heapq.heappop(heap)
+            if split_index in keep_indices or not (left < split_index < right):
+                continue
+            if any(left < index < right for index in keep_indices):
+                continue
+            keep_indices.add(split_index)
+            self._push_priority_segment(heap, x_values, y_values, left, split_index)
+            self._push_priority_segment(heap, x_values, y_values, split_index, right)
+
+        return [x_values[i] for i in sorted(keep_indices)]
     def _natural_x_values(self, args, point_count, max_input):
         offset = max(0.0, float(args.get("input_offset", 0.0)))
         if point_count <= 1:
