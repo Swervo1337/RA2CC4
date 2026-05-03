@@ -19,6 +19,44 @@ CYAN = "\033[96m"
 WHITE = "\033[97m"
 SOFT_CYAN = "\033[36m"
 RESET = "\033[0m"
+MAX_FLOAT = 1e300
+MAX_EXPONENT = 700.0
+MIN_EXPONENT = -745.0
+def safe_exp(value):
+    value = float(value)
+    if value >= MAX_EXPONENT:
+        return MAX_FLOAT
+    if value <= MIN_EXPONENT:
+        return 0.0
+    return math.exp(value)
+def safe_pow(base, exponent, fallback=MAX_FLOAT):
+    try:
+        value = math.pow(float(base), float(exponent))
+    except (OverflowError, ValueError, ZeroDivisionError):
+        return fallback
+    if not math.isfinite(value):
+        return fallback
+    return value
+def finite_value(value, fallback=0.0):
+    try:
+        value = float(value)
+    except Exception:
+        return fallback
+    return value if math.isfinite(value) else fallback
+def safe_divide(numerator, denominator, fallback=MAX_FLOAT):
+    try:
+        denominator = float(denominator)
+        numerator = float(numerator)
+    except Exception:
+        return fallback
+    if abs(denominator) <= 1e-300:
+        if abs(numerator) <= 1e-300:
+            return 0.0
+        return math.copysign(fallback, numerator)
+    value = numerator / denominator
+    if not math.isfinite(value):
+        return math.copysign(fallback, value if value else numerator)
+    return max(-fallback, min(fallback, value))
 def sep(width=60):
     return f"{GRAY}{'=' * width}{RESET}"
 def color_gui_brackets(text, active_color=RESET):
@@ -1263,7 +1301,7 @@ class NaturalCurveBase:
         self.offset = float(input_offset)
         self.decay_rate = float(decay_rate)
         self.limit = float(limit) - 1
-        self._is_flat_limit = abs(self.limit) <= 1e-10
+        self._is_flat_limit = abs(self.limit) <= 1e-10 or abs(self.decay_rate) <= 1e-12
         self.accel = self.decay_rate / abs(self.limit) if not self._is_flat_limit else 0.0
     def flat_segments(self):
         if self._is_flat_limit:
@@ -1276,7 +1314,7 @@ class NaturalCurveLegacy(NaturalCurveBase):
         if self._is_flat_limit:
             return 1.0
         offset_x = self.offset - x
-        decay = math.exp(self.accel * offset_x)
+        decay = safe_exp(self.accel * offset_x)
         return self.limit * (1 - (self.offset - decay * offset_x) / x) + 1
 class NaturalCurveGain(NaturalCurveBase):
     def __init__(self, input_offset, decay_rate, limit):
@@ -1288,7 +1326,7 @@ class NaturalCurveGain(NaturalCurveBase):
         if self._is_flat_limit:
             return 1.0
         offset_x = self.offset - x
-        decay = math.exp(self.accel * offset_x)
+        decay = safe_exp(self.accel * offset_x)
         output = self.limit * (decay / self.accel - offset_x) + self.constant
         return output / x + 1
 class JumpCurveBase:
@@ -1306,7 +1344,7 @@ class JumpCurveBase:
             return []
         return [(0.0, self.step_x, 1.0)]
     def decay(self, x):
-        return math.exp(self.smooth_rate * (self.step_x - x))
+        return safe_exp(self.smooth_rate * (self.step_x - x))
     def smooth_value(self, x):
         return self.step_y / (1.0 + self.decay(x))
     def smooth_antideriv(self, x):
@@ -1336,14 +1374,14 @@ class ClassicCurveBase:
     def __init__(self, input_offset, acceleration, exponent):
         self.offset = float(input_offset)
         self.acceleration = float(acceleration)
-        self.exponent = float(exponent)
+        self.exponent = max(float(exponent), 1e-12)
     def flat_segments(self):
         return [(0.0, self.offset, 1.0)] if self.offset > 0.0 else []
     def base_fn(self, x, accel_raised):
-        return accel_raised * math.pow(x - self.offset, self.exponent) / x
+        return accel_raised * safe_pow(x - self.offset, self.exponent) / x
     def base_accel(self, x, y):
-        return math.pow(
-            x * y * math.pow(x - self.offset, -self.exponent),
+        return safe_pow(
+            x * y * safe_pow(x - self.offset, -self.exponent),
             1 / (self.exponent - 1)
         )
 class ClassicCurveLegacy(ClassicCurveBase):
@@ -1351,7 +1389,7 @@ class ClassicCurveLegacy(ClassicCurveBase):
         super().__init__(input_offset, acceleration, exponent)
         self.cap = float("inf")
         self.sign = 1.0
-        self.accel_raised = math.pow(self.acceleration, self.exponent - 1)
+        self.accel_raised = safe_pow(self.acceleration, self.exponent - 1)
         cap_mode = cap_mode.lower()
         if cap_mode == "io":
             self.cap = cap_y - 1.0
@@ -1360,7 +1398,7 @@ class ClassicCurveLegacy(ClassicCurveBase):
                 self.sign = -self.sign
             if cap_x > self.offset and self.cap > 0:
                 a = self.base_accel(cap_x, self.cap)
-                self.accel_raised = math.pow(a, self.exponent - 1)
+                self.accel_raised = safe_pow(a, self.exponent - 1)
         elif cap_mode == "in":
             if cap_x > 0:
                 self.cap = self.base_fn(cap_x, self.accel_raised)
@@ -1381,7 +1419,7 @@ class ClassicCurveGain(ClassicCurveBase):
         self.cap_y = float("inf")
         self.constant = 0.0
         self.sign = 1.0
-        self.accel_raised = math.pow(self.acceleration, self.exponent - 1)
+        self.accel_raised = safe_pow(self.acceleration, self.exponent - 1)
         cap_mode = cap_mode.lower()
         if cap_mode == "io":
             self.cap_x = cap_x
@@ -1391,7 +1429,7 @@ class ClassicCurveGain(ClassicCurveBase):
                 self.sign = -self.sign
             if self.cap_x > self.offset and self.cap_y > 0:
                 a = self.gain_accel(self.cap_x, self.cap_y, self.exponent, self.offset)
-                self.accel_raised = math.pow(a, self.exponent - 1)
+                self.accel_raised = safe_pow(a, self.exponent - 1)
                 self.constant = (self.base_fn(self.cap_x, self.accel_raised) - self.cap_y) * self.cap_x
         elif cap_mode == "in":
             if cap_x > 0:
@@ -1424,13 +1462,19 @@ class ClassicCurveGain(ClassicCurveBase):
         return self.sign * output + 1.0
     @staticmethod
     def gain(x, accel, power, offset):
-        return power * math.pow(accel * (x - offset), power - 1)
+        if accel <= 0:
+            return 0.0
+        return power * safe_pow(accel * (x - offset), power - 1)
     @staticmethod
     def gain_inverse(y, accel, power, offset):
-        return (accel * offset + math.pow(y / power, 1 / (power - 1))) / accel
+        if accel <= 0:
+            return float("inf")
+        return (accel * offset + safe_pow(y / power, 1 / (power - 1))) / accel
     @staticmethod
     def gain_accel(x, y, power, offset):
-        return -math.pow(y / power, 1 / (power - 1)) / (offset - x)
+        if abs(offset - x) <= 1e-12:
+            return 0.0
+        return -safe_pow(y / power, 1 / (power - 1)) / (offset - x)
 class SynchronousCurveLegacy:
     def __init__(self, gamma, motivity, sync_speed, smooth):
         self.motivity = max(float(Fraction(motivity).limit_denominator(10000)), 1e-12)
@@ -1446,7 +1490,7 @@ class SynchronousCurveLegacy:
         self.minimum_sens = 1.0 / self.motivity
         self.maximum_sens = self.motivity
         if self.use_linear_clamp and abs(self.gamma_const) > 1e-12:
-            clamp_factor = math.exp(1.0 / self.gamma_const)
+            clamp_factor = safe_exp(1.0 / self.gamma_const)
             self.lower_clamp_x = self.sync_speed / clamp_factor
             self.upper_clamp_x = self.sync_speed * clamp_factor
         else:
@@ -1468,17 +1512,21 @@ class SynchronousCurveLegacy:
                 return self.minimum_sens
             if log_space > 1.0:
                 return self.maximum_sens
-            return math.exp(log_space * self.log_motivity)
+            return safe_exp(log_space * self.log_motivity)
         if x == self.sync_speed:
             return 1.0
         log_diff = math.log(x) - self.log_syncspeed
         if log_diff > 0:
             log_space = self.gamma_const * log_diff
-            exponent = math.pow(math.tanh(math.pow(log_space, self.sharpness)), self.sharpness_recip)
-            return math.exp(exponent * self.log_motivity)
+            shaped = safe_pow(log_space, self.sharpness)
+            tanh_value = 1.0 if shaped >= MAX_FLOAT else math.tanh(shaped)
+            exponent = safe_pow(tanh_value, self.sharpness_recip)
+            return safe_exp(exponent * self.log_motivity)
         log_space = -self.gamma_const * log_diff
-        exponent = -math.pow(math.tanh(math.pow(log_space, self.sharpness)), self.sharpness_recip)
-        return math.exp(exponent * self.log_motivity)
+        shaped = safe_pow(log_space, self.sharpness)
+        tanh_value = 1.0 if shaped >= MAX_FLOAT else math.tanh(shaped)
+        exponent = -safe_pow(tanh_value, self.sharpness_recip)
+        return safe_exp(exponent * self.log_motivity)
 class SynchronousCurveGain:
     RANGE_START = -3
     RANGE_STOP = 9
@@ -1547,7 +1595,7 @@ class SynchronousCurveGain:
         return [(0.0, self.lower_clamp_x, self.minimum_sens)]
 class MotivityCurveLegacy:
     def __init__(self, growth_rate, motivity, midpoint):
-        self.accel = math.exp(float(growth_rate))
+        self.accel = min(safe_exp(float(growth_rate)), 1e12)
         self.motivity = max(float(motivity), 1e-12)
         self.midpoint = max(float(midpoint), 1e-12)
         self.log_midpoint = math.log(self.midpoint)
@@ -1557,8 +1605,13 @@ class MotivityCurveLegacy:
     def __call__(self, x):
         if x <= 0.0:
             return self.minimum_sens
-        denom = math.exp(self.accel * (self.log_midpoint - math.log(x))) + 1.0
-        return math.exp(self.motivity_term / denom + self.constant)
+        exponent = self.accel * (self.log_midpoint - math.log(x))
+        if exponent >= 60.0:
+            return self.minimum_sens
+        if exponent <= -60.0:
+            return self.motivity
+        denom = safe_exp(exponent) + 1.0
+        return safe_exp(self.motivity_term / denom + self.constant)
 class MotivityCurveGain:
     RANGE_START = -3
     RANGE_STOP = 9
@@ -1675,26 +1728,26 @@ class PowerCurveBase:
         return [(0.0, self.offset_x, self.offset_y)] if self.offset_x > 0.0 else []
     @staticmethod
     def gain(input_val, power, scale):
-        return (power + 1.0) * math.pow(input_val * scale, power)
+        return (power + 1.0) * safe_pow(input_val * scale, power)
     @staticmethod
     def gain_inverse(gain, power, scale):
-        return math.pow(gain / (power + 1.0), 1.0 / power) / scale
+        return safe_divide(safe_pow(gain / (power + 1.0), 1.0 / power), scale)
     @staticmethod
     def scale_from_gain_point(input_val, gain, power):
-        return math.pow(gain / (power + 1.0), 1.0 / power) / input_val
+        if input_val <= 0:
+            return 1.0
+        return safe_divide(safe_pow(gain / (power + 1.0), 1.0 / power), input_val)
     @staticmethod
     def scale_from_output_point(input_val, output, power, constant):
-        return math.pow(output - constant / input_val, 1.0 / power) / input_val
+        if input_val <= 0:
+            return 1.0
+        return safe_divide(safe_pow(output - constant / input_val, 1.0 / power), input_val)
     @staticmethod
     def integration_constant(input_val, gain, output):
         return (output - gain) * input_val
     @staticmethod
     def ieee_divide(numerator, denominator):
-        if denominator != 0:
-            return numerator / denominator
-        if numerator == 0:
-            return float("nan")
-        return math.copysign(float("inf"), numerator)
+        return safe_divide(numerator, denominator)
     def _setup_parameters(self):
         if self.cap_mode != "io":
             self.scale = self.scale
@@ -1717,7 +1770,7 @@ class PowerCurveBase:
     def base_fn(self, x):
         if x <= self.offset_x:
             return self.offset_y
-        return math.pow(self.scale * x, self.power) + self.constant / x
+        return safe_pow(self.scale * x, self.power) + self.constant / x
 class PowerCurveLegacy(PowerCurveBase):
     def __init__(self, output_offset, scale, exponent_power, cap_mode, cap_x, cap_y):
         super().__init__(output_offset, scale, exponent_power, cap_mode, cap_x, cap_y, gain_curve=False)
@@ -1756,6 +1809,8 @@ class PowerCurveGain(PowerCurveBase):
                 self.cap_y_eff = self.cap_y
         self.constant_b = self.integration_constant(self.cap_x_eff, self.cap_y_eff, self.base_fn(self.cap_x_eff))
     def __call__(self, x):
+        if x <= 0.0 and self.cap_x_eff <= 0.0:
+            return self.cap_y_eff
         if x < self.cap_x_eff:
             out = self.base_fn(x)
         else:
@@ -1810,7 +1865,7 @@ class CurveGenerator:
             return None
         offset = args["input_offset"]
         accel = args["acceleration"]
-        exponent = args["exponent"]
+        exponent = max(float(args["exponent"]), 1e-12)
         cap_x = args.get("cap_x", 0.0)
         cap_y = args.get("cap_y", 0.0)
         if self.cap_mode in ["in", "io"]:
@@ -1820,7 +1875,7 @@ class CurveGenerator:
             if abs(cap_y_adj) <= 1e-12:
                 return 0.0
             cap_y_abs = abs(cap_y_adj)
-            return (accel * offset + math.pow(cap_y_abs / exponent, 1 / (exponent - 1))) / accel
+            return (accel * offset + safe_pow(cap_y_abs / exponent, 1 / (exponent - 1))) / accel
         return None
     def _power_gain_cap_breakpoint(self, args):
         if self.mode_name != "power" or self.curve_type != "gain":
@@ -1832,7 +1887,7 @@ class CurveGenerator:
         if self.cap_mode in ["in", "io"]:
             return cap_x if cap_x > 0 else None
         if cap_y > 0:
-            return math.pow(cap_y / (p + 1.0), 1.0 / p) / s
+            return safe_divide(safe_pow(cap_y / (p + 1.0), 1.0 / p), s)
         return None
     def _power_offset_breakpoint(self, args):
         if self.mode_name != "power":
@@ -1849,7 +1904,7 @@ class CurveGenerator:
                 s = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, p)
         if output_offset <= 0:
             return 0.0
-        return math.pow(output_offset / (p + 1.0), 1.0 / p) / s
+        return safe_divide(safe_pow(output_offset / (p + 1.0), 1.0 / p), s)
     def _special_breakpoint(self, args):
         classic_bp = self._classic_gain_cap_breakpoint(args)
         if classic_bp is not None:
@@ -2142,10 +2197,14 @@ class CurveGenerator:
         if len(x_values) <= 1:
             return x_values
         output = set(x_values)
+        min_x = x_values[0]
+        max_x = x_values[-1]
         if protected:
             for x in protected:
                 try:
-                    output.add(float(x))
+                    x = float(x)
+                    if math.isfinite(x) and min_x <= x <= max_x:
+                        output.add(x)
                 except Exception:
                     pass
         precision = int(precision)
@@ -2926,13 +2985,13 @@ def estimate_default_max_input(mode, curve_type, cap_mode, args):
             return max(base, cap_x * 2.0, 200.0)
         if cap_mode == "out" and curve_type == "gain":
             accel = args.get("acceleration", 0.0)
-            exponent = args.get("exponent", 2.0)
+            exponent = max(float(args.get("exponent", 2.0)), 1e-12)
             cap_y = args.get("cap_y", 0.0) - 1.0
             if accel > 0 and exponent != 1 and abs(cap_y) > 1e-12:
                 cap_y_abs = abs(cap_y)
-                cap_x = (accel * offset + math.pow(cap_y_abs / exponent, 1 / (exponent - 1))) / accel
-                accel_raised = math.pow(accel, exponent - 1.0)
-                base_at_cap = accel_raised * math.pow(max(cap_x - offset, 1e-12), exponent) / max(cap_x, 1e-12)
+                cap_x = (accel * offset + safe_pow(cap_y_abs / exponent, 1 / (exponent - 1))) / accel
+                accel_raised = safe_pow(accel, exponent - 1.0)
+                base_at_cap = accel_raised * safe_pow(max(cap_x - offset, 1e-12), exponent) / max(cap_x, 1e-12)
                 constant = (base_at_cap - cap_y_abs) * cap_x
                 tail_cover = bounded_tail_cover(cap_x, constant, cap_y_abs)
                 return max(base, cap_x * 2.0, tail_cover, 200.0)
@@ -2948,13 +3007,13 @@ def estimate_default_max_input(mode, curve_type, cap_mode, args):
                 output_offset = 0.0
             elif curve_type == "gain" and cap_x > 0:
                 scale = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, exponent_power)
-        offset_x = math.pow(output_offset / (exponent_power + 1.0), 1.0 / exponent_power) / scale if output_offset > 0 else 0.0
+        offset_x = safe_divide(safe_pow(output_offset / (exponent_power + 1.0), 1.0 / exponent_power), scale) if output_offset > 0 else 0.0
         power_base = max(120.0, offset_x * 2.5)
         if cap_mode in ["in", "io"] and cap_x > 0:
             return min(max(power_base, cap_x * 2.5, 200.0), 1000.0)
         if cap_mode == "out" and curve_type == "gain" and cap_y > 0:
-            cap_x = math.pow(cap_y / (exponent_power + 1.0), 1.0 / exponent_power) / scale
-            base_at_cap = math.pow(scale * cap_x, exponent_power)
+            cap_x = safe_divide(safe_pow(cap_y / (exponent_power + 1.0), 1.0 / exponent_power), scale)
+            base_at_cap = safe_pow(scale * cap_x, exponent_power)
             constant_b = (base_at_cap - cap_y) * cap_x
             tail_cover = bounded_tail_cover(cap_x, constant_b, cap_y)
             return min(max(power_base, cap_x * 2.5, tail_cover, 200.0), 1000.0)
