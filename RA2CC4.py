@@ -1,4 +1,5 @@
 import json
+import ast
 import math
 import heapq
 import uuid
@@ -58,6 +59,134 @@ def safe_divide(numerator, denominator, fallback=MAX_FLOAT):
     if not math.isfinite(value):
         return math.copysign(fallback, value if value else numerator)
     return max(-fallback, min(fallback, value))
+ALLOWED_NUMERIC_CONSTANTS = {
+    "e": math.e,
+    "pi": math.pi,
+    "tau": math.tau,
+}
+ALLOWED_NUMERIC_FUNCTIONS = {
+    "abs": abs,
+    "min": min,
+    "max": max,
+}
+for _math_name in [
+    "acos",
+    "asin",
+    "atan",
+    "atan2",
+    "ceil",
+    "copysign",
+    "cos",
+    "cosh",
+    "degrees",
+    "exp",
+    "fabs",
+    "floor",
+    "fmod",
+    "hypot",
+    "log",
+    "log10",
+    "log2",
+    "pow",
+    "radians",
+    "remainder",
+    "sin",
+    "sinh",
+    "sqrt",
+    "tan",
+    "tanh",
+    "trunc",
+]:
+    if hasattr(math, _math_name):
+        ALLOWED_NUMERIC_FUNCTIONS[_math_name] = getattr(math, _math_name)
+if hasattr(math, "cbrt"):
+    ALLOWED_NUMERIC_FUNCTIONS["cbrt"] = math.cbrt
+def coerce_expression_number(value):
+    try:
+        out = float(value)
+    except Exception as exc:
+        raise ValueError("Expression did not produce a number.") from exc
+    if not math.isfinite(out) or abs(out) > MAX_FLOAT:
+        raise ValueError("Expression result is not finite.")
+    return out
+def resolve_expression_function(node):
+    if isinstance(node, ast.Name) and node.id in ALLOWED_NUMERIC_FUNCTIONS:
+        return ALLOWED_NUMERIC_FUNCTIONS[node.id]
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "math"
+        and node.attr in ALLOWED_NUMERIC_FUNCTIONS
+    ):
+        return ALLOWED_NUMERIC_FUNCTIONS[node.attr]
+    raise ValueError("Unsupported function.")
+def eval_numeric_expression_node(node):
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+            raise ValueError("Only numeric constants are allowed.")
+        return coerce_expression_number(node.value)
+    if isinstance(node, ast.UnaryOp):
+        operand = eval_numeric_expression_node(node.operand)
+        if isinstance(node.op, ast.UAdd):
+            return operand
+        if isinstance(node.op, ast.USub):
+            return coerce_expression_number(-operand)
+        raise ValueError("Unsupported unary operator.")
+    if isinstance(node, ast.BinOp):
+        left = eval_numeric_expression_node(node.left)
+        right = eval_numeric_expression_node(node.right)
+        try:
+            if isinstance(node.op, ast.Add):
+                result = left + right
+            elif isinstance(node.op, ast.Sub):
+                result = left - right
+            elif isinstance(node.op, ast.Mult):
+                result = left * right
+            elif isinstance(node.op, ast.Div):
+                result = left / right
+            elif isinstance(node.op, ast.Pow):
+                result = left ** right
+            else:
+                raise ValueError("Unsupported arithmetic operator.")
+        except (OverflowError, ValueError, ZeroDivisionError) as exc:
+            raise ValueError("Invalid arithmetic expression.") from exc
+        return coerce_expression_number(result)
+    if isinstance(node, ast.Name):
+        if node.id in ALLOWED_NUMERIC_CONSTANTS:
+            return ALLOWED_NUMERIC_CONSTANTS[node.id]
+        raise ValueError("Unsupported name.")
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "math"
+        and node.attr in ALLOWED_NUMERIC_CONSTANTS
+    ):
+        return ALLOWED_NUMERIC_CONSTANTS[node.attr]
+    if isinstance(node, ast.Call):
+        if node.keywords:
+            raise ValueError("Keyword arguments are not supported.")
+        function = resolve_expression_function(node.func)
+        args = [eval_numeric_expression_node(arg) for arg in node.args]
+        try:
+            return coerce_expression_number(function(*args))
+        except (OverflowError, TypeError, ValueError, ZeroDivisionError) as exc:
+            raise ValueError("Invalid function call.") from exc
+    raise ValueError("Unsupported expression.")
+def parse_numeric_expression(value):
+    if isinstance(value, bool):
+        raise ValueError("Boolean values are not numbers.")
+    if isinstance(value, (int, float, Fraction)):
+        return coerce_expression_number(value)
+    text = str(value).strip()
+    if not text:
+        raise ValueError("Empty number.")
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError("Invalid number expression.") from exc
+    if sum(1 for _ in ast.walk(tree)) > 80:
+        raise ValueError("Expression is too complex.")
+    return eval_numeric_expression_node(tree.body)
 def sep(width=60):
     return f"{GRAY}{'=' * width}{RESET}"
 def color_gui_brackets(text, active_color=RESET):
@@ -970,7 +1099,7 @@ def finish_generated_output(generator_profiles):
             return "menu", None
 def safe_float(value, fallback=0.0, minimum=0.0, maximum=None):
     try:
-        out = float(value)
+        out = parse_numeric_expression(value)
     except Exception:
         out = float(fallback)
     if minimum is not None and out < minimum:
@@ -1121,7 +1250,7 @@ def parse_lookup_points(raw_points):
         return points
     def parse_num(v):
         try:
-            return float(v)
+            return parse_numeric_expression(v)
         except Exception:
             return None
     for item in raw_points:
@@ -3074,7 +3203,7 @@ def float_input_screen(title, label, current, minimum=0.0, maximum=None):
         if not value:
             return current
         try:
-            parsed = float(Fraction(value)) if "/" in value else float(value)
+            parsed = parse_numeric_expression(value)
             if minimum is not None and parsed < minimum:
                 themed_number_error(f" Value must be >= {minimum:g}.")
                 input(f"\n{GRAY}Use ENTER to try again{RESET}")
@@ -3085,7 +3214,7 @@ def float_input_screen(title, label, current, minimum=0.0, maximum=None):
                 continue
             return parsed
         except Exception:
-            themed_number_error(" Invalid input. Enter a valid number (examples: 1.5, 2, 1/3).")
+            themed_number_error(" Invalid input. Enter a valid number (examples: 1.5, 2, 1/3, sqrt(1.5)).")
             input(f"\n{GRAY}Use ENTER to try again{RESET}")
 def setup_curve_options(mode, profile_name, curve_type, cap_mode, args):
     options = [
