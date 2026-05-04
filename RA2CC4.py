@@ -9,6 +9,7 @@ import ctypes
 import subprocess
 import time
 import tkinter as tk
+import textwrap
 from tkinter import filedialog
 from fractions import Fraction
 GRAY = "\033[90m"
@@ -192,9 +193,9 @@ def sep(width=60):
 def color_gui_brackets(text, active_color=RESET):
     return str(text).replace("[", f"{GRAY}[").replace("]", f"]{active_color}")
 def menu_footer(esc_text="go back"):
-    print(f"\n{GRAY}Use ↑ ↓ to move | ENTER to select | ESC to {esc_text}{RESET}")
+    print(f"\n{GRAY}Use UP/DOWN to move | ENTER to select | ESC to {esc_text}{RESET}")
 def main_menu_footer():
-    print(f"\n{GRAY}Use ↑ ↓ to move | ENTER to select | Q or ESC to quit{RESET}")
+    print(f"\n{GRAY}Use UP/DOWN to move | ENTER to select | Q or ESC to quit{RESET}")
 def pause_footer(action="return to menu"):
     print(f"\n{GRAY}Use ENTER or ESC to {action}{RESET}")
 POINT_TENSION = "0.5"
@@ -206,6 +207,7 @@ CONFIG_KEYS = (
     "args",
     "filename",
     "rawaccel_path",
+    "customcurve_path",
     "point_count",
     "precision",
     "point_reduction_mode",
@@ -224,10 +226,16 @@ LEGACY_CONFIG_PATHS = [
 POINT_OPTIONS = [32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024, 2048, 4096]
 PRECISION_OPTIONS = list(range(1, 11))
 REDUCTION_OPTIONS = ["optimal", "normal", "aggressive"]
+SMOOTH_TRANSITION_OPTIONS = ["off", "natural", "strong"]
+SMOOTH_TRANSITION_STRENGTHS = {
+    "off": 0.0,
+    "natural": 1.0,
+    "strong": 1.75,
+}
 RECOMMENDED_POINTS = 128
 RECOMMENDED_PRECISION = 6
 RECOMMENDED_REDUCTION = "optimal"
-SMOOTH_TRANSITION_ON_STRENGTH = 1.0
+RECOMMENDED_SMOOTH_TRANSITIONS = "off"
 MODES = [
     ("Classic/Linear", True),
     ("Jump", True),
@@ -241,6 +249,17 @@ MODES = [
 ]
 def clear():
     os.system("cls" if os.name == "nt" else "clear")
+def menu_pointer(active):
+    return "➤ " if active else "  "
+def print_detail_line(label, value, color=BLUE, width=70):
+    label = str(label)
+    value = str(value)
+    value_width = max(24, width - len(label) - 5)
+    chunks = textwrap.wrap(value, width=value_width, break_long_words=False, break_on_hyphens=False) or [""]
+    print(f" {color}{label}:{RESET} {chunks[0]}")
+    indent = " " * (len(label) + 3)
+    for chunk in chunks[1:]:
+        print(f"{indent}{chunk}")
 def print_menu(selected, last=None):
     clear()
     last = last if isinstance(last, dict) else {}
@@ -252,7 +271,7 @@ def print_menu(selected, last=None):
     rawaccel_path = get_saved_rawaccel_path(last)
     import_label = f"Import from settings.json [{rawaccel_path}]" if rawaccel_path else "Import from settings.json"
     for i, (name, supported) in enumerate(MODES):
-        prefix = "➤ " if i == selected else "  "
+        prefix = menu_pointer(i == selected)
         name_lower = name.lower()
         if name_lower == "import from settings.json":
             print()
@@ -303,7 +322,7 @@ def value_choice_selector(title, options, current=None, recommended=None, width=
         print()
         for i, option in enumerate(options):
             label, value = option
-            prefix = "➤ " if i == selected else "  "
+            prefix = menu_pointer(i == selected)
             if i == selected:
                 color = CYAN
             elif value == saved_value:
@@ -341,7 +360,7 @@ def number_selector(title, values, current=None, recommended=None, width=70, on_
         print(sep(width))
         print()
         for i, value in enumerate(string_values):
-            prefix = "➤ " if i == selected else "  "
+            prefix = menu_pointer(i == selected)
             if i == selected:
                 color = CYAN
             elif str(saved_value) == value:
@@ -373,7 +392,7 @@ def themed_choice_selector(title, options, note=None, width=70):
         print(sep(width))
         print()
         for i, option in enumerate(options):
-            prefix = "➤ " if i == selected else "  "
+            prefix = menu_pointer(i == selected)
             color = CYAN if i == selected else WHITE
             label = color_gui_brackets(option[0], color)
             print(f"{prefix}{color}{label}{RESET}")
@@ -391,17 +410,49 @@ def themed_choice_selector(title, options, note=None, width=70):
             return options[selected][1]
         elif key == b'\x1b':
             return "menu"
-def import_error_screen(title, message):
-    clear()
-    print(sep(70))
-    print(f" {RED}{title}{RESET}")
-    print(sep(70))
-    print(f"\n{RED}{message}{RESET}")
-    pause_footer("return to menu")
+def detail_action_screen(title, lines=None, options=None, title_color=CYAN, width=70, esc_text="return to menu"):
+    lines = lines or []
+    options = options or [("Return to menu", "menu")]
+    selected = 0
     while True:
+        clear()
+        print(sep(width))
+        print(f" {title_color}{title}{RESET}")
+        print(sep(width))
+        if lines:
+            print()
+            for line in lines:
+                if isinstance(line, tuple) and len(line) >= 2:
+                    label, value = line[0], line[1]
+                    color = line[2] if len(line) >= 3 else BLUE
+                    print_detail_line(label, value, color=color, width=width)
+                else:
+                    print(f" {line}")
+        print()
+        for i, option in enumerate(options):
+            label, value = option
+            prefix = menu_pointer(i == selected)
+            color = CYAN if i == selected else WHITE
+            print(f"{prefix}{color}{label}{RESET}")
+        menu_footer(esc_text)
         key = msvcrt.getch()
-        if key in [b'\r', b'\x1b']:
-            return
+        if key == b'\xe0':
+            key = msvcrt.getch()
+            if key == b'H':
+                selected = (selected - 1) % len(options)
+            elif key == b'P':
+                selected = (selected + 1) % len(options)
+        elif key == b'\r':
+            return options[selected][1]
+        elif key == b'\x1b':
+            return "menu"
+def import_error_screen(title, message):
+    detail_action_screen(
+        title,
+        [("Problem", message, RED)],
+        [("Return to menu", "menu")],
+        title_color=RED
+    )
 def unsupported_mode_screen():
     import_error_screen("UNSUPPORTED MODE", "Unsupported mode detected")
 def screen_header(title, width=70):
@@ -488,6 +539,8 @@ def clean_invalid_rawaccel_path():
     cleaned = normalize_config_values(load_last_config())
     original_path = str(cleaned.get("rawaccel_path", "")).strip()
     normalized_path = os.path.abspath(original_path) if original_path else ""
+    customcurve_path = str(cleaned.get("customcurve_path", "")).strip()
+    normalized_customcurve_path = os.path.abspath(customcurve_path) if customcurve_path else ""
     changed = False
     if original_path:
         if validate_rawaccel_path(normalized_path):
@@ -496,6 +549,14 @@ def clean_invalid_rawaccel_path():
                 changed = True
         else:
             cleaned["rawaccel_path"] = ""
+            changed = True
+    if customcurve_path:
+        if validate_customcurve_path(normalized_customcurve_path):
+            if normalized_customcurve_path != customcurve_path:
+                cleaned["customcurve_path"] = normalized_customcurve_path
+                changed = True
+        else:
+            cleaned["customcurve_path"] = ""
             changed = True
     if changed:
         save_last_config(cleaned)
@@ -520,11 +581,27 @@ def get_output_reduction(config=None):
 def format_reduction_label(value):
     value = str(value or "").strip().lower()
     return value[:1].upper() + value[1:] if value else ""
-def get_smooth_transitions(config=None):
+def normalize_smooth_transition_mode(value):
+    if isinstance(value, bool):
+        return "natural" if value else "off"
+    if isinstance(value, (int, float)):
+        return "natural" if value != 0 else "off"
+    text = str(value or "").strip().lower()
+    if text in ["true", "yes", "y", "on", "1"]:
+        return "natural"
+    if text in ["false", "no", "n", "0"]:
+        return "off"
+    return text if text in SMOOTH_TRANSITION_OPTIONS else RECOMMENDED_SMOOTH_TRANSITIONS
+def get_smooth_transition_mode(config=None):
     data = config if isinstance(config, dict) else load_last_config()
-    return parse_bool(data.get("smooth_transitions", False), False)
+    return normalize_smooth_transition_mode(data.get("smooth_transitions", RECOMMENDED_SMOOTH_TRANSITIONS))
+def get_smooth_transitions(config=None):
+    return get_smooth_transition_mode(config) != "off"
 def get_smooth_transition_strength(config=None):
-    return SMOOTH_TRANSITION_ON_STRENGTH if get_smooth_transitions(config) else 0.0
+    return SMOOTH_TRANSITION_STRENGTHS.get(get_smooth_transition_mode(config), 0.0)
+def format_smooth_transition_label(value):
+    mode = normalize_smooth_transition_mode(value)
+    return mode[:1].upper() + mode[1:] if mode else "Off"
 def pick_rawaccel_folder():
     try:
         root = tk.Tk()
@@ -535,15 +612,54 @@ def pick_rawaccel_folder():
         return path or None
     except Exception:
         return None
+def validate_customcurve_path(path):
+    if not path:
+        return False
+    file_path = os.path.abspath(path)
+    return (
+        os.path.isfile(file_path)
+        and os.path.basename(file_path).lower() == "customcurve.exe"
+    )
+def get_customcurve_exe_from_folder(folder):
+    if not folder:
+        return None
+    exe_path = os.path.join(os.path.abspath(folder), "CustomCurve.exe")
+    return exe_path if validate_customcurve_path(exe_path) else None
+def resolve_customcurve_exe_path(path):
+    if validate_customcurve_path(path):
+        return os.path.abspath(path)
+    if path and os.path.isdir(path):
+        return get_customcurve_exe_from_folder(path)
+    return None
+def get_saved_customcurve_path(config=None):
+    data = config if isinstance(config, dict) else load_last_config()
+    path = str(data.get("customcurve_path", "")).strip()
+    return resolve_customcurve_exe_path(path)
+def get_saved_customcurve_folder(config=None):
+    exe_path = get_saved_customcurve_path(config)
+    return os.path.dirname(exe_path) if exe_path else None
+def pick_customcurve_folder():
+    try:
+        root = tk.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        path = filedialog.askdirectory(title="Select CustomCurve folder")
+        root.destroy()
+        return path or None
+    except Exception:
+        return None
 def advanced_settings_options(config):
     rawaccel_path = get_saved_rawaccel_path(config)
     rawaccel_display = rawaccel_path if rawaccel_path else "Not set"
+    customcurve_folder = get_saved_customcurve_folder(config)
+    customcurve_display = customcurve_folder if customcurve_folder else "Not set"
     return [
         (f"Set RawAccel Path [{rawaccel_display}]", "set_rawaccel_path"),
+        (f"Set CustomCurve Path [{customcurve_display}]", "set_customcurve_path"),
         (f"Set Points [{get_output_points(config)}]", "set_points"),
         (f"Set Precision [{get_output_precision(config)}]", "set_precision"),
         (f"Set Point Reduction Mode [{format_reduction_label(get_output_reduction(config))}]", "set_point_reduction"),
-        (f"Smooth Transitions [{'On' if get_smooth_transitions(config) else 'Off'}]", "set_smooth_transitions"),
+        (f"Smooth Transitions [{format_smooth_transition_label(get_smooth_transition_mode(config))}]", "set_smooth_transitions"),
     ]
 def advanced_settings_menu():
     while True:
@@ -563,6 +679,17 @@ def advanced_settings_menu():
                 import_error_screen("INVALID RAWACCEL PATH", "Folder must contain RawAccel")
                 continue
             last["rawaccel_path"] = os.path.abspath(folder)
+            save_last_config(last)
+            continue
+        if choice == "set_customcurve_path":
+            folder = pick_customcurve_folder()
+            if not folder:
+                continue
+            exe_path = get_customcurve_exe_from_folder(folder)
+            if not exe_path:
+                import_error_screen("INVALID CUSTOMCURVE PATH", "Selected folder must contain CustomCurve.exe.")
+                continue
+            last["customcurve_path"] = os.path.abspath(exe_path)
             save_last_config(last)
             continue
         if choice == "set_points":
@@ -610,12 +737,12 @@ def advanced_settings_menu():
         if choice == "set_smooth_transitions":
             def save_smooth_transitions(value):
                 data = clean_invalid_rawaccel_path()
-                data["smooth_transitions"] = (value == "on")
+                data["smooth_transitions"] = value
                 save_last_config(data)
             value_choice_selector(
                 "SMOOTH TRANSITIONS",
-                [("Off", "off"), ("On", "on")],
-                current="on" if get_smooth_transitions(last) else "off",
+                [("Off", "off"), ("Natural", "natural"), ("Strong", "strong")],
+                current=get_smooth_transition_mode(last),
                 recommended="off",
                 width=70,
                 on_select=save_smooth_transitions
@@ -785,9 +912,9 @@ def reopened_customcurve_screen(exe_path, opened):
     print(sep(70))
     print(f" {GREEN}CUSTOMCURVE UPDATED{RESET}")
     print(sep(70))
-    print(f"\n{GREEN}✓ Profile data loaded successfully.{RESET}")
+    print(f"\n{GREEN}[OK] Profile data loaded successfully.{RESET}")
     if opened:
-        print(f"{GREEN}✓ CustomCurve was reopened automatically.{RESET}")
+        print(f"{GREEN}[OK] CustomCurve was reopened automatically.{RESET}")
         print(f"{BLUE}App:{RESET} {exe_path}")
     else:
         print(f"{YELLOW}CustomCurve was updated, but it could not be reopened automatically.{RESET}")
@@ -828,7 +955,7 @@ def wait_for_customcurve_closed_or_fallback(generator_profiles):
         if choice == "retry":
             continue
         if choice == "close_retry":
-            exe_path = get_customcurve_exe_path()
+            exe_path = get_customcurve_exe_path() or get_saved_customcurve_path(clean_invalid_rawaccel_path())
             close_customcurve_process()
             wait_until_customcurve_closed_screen()
             return "closed_open_after", exe_path
@@ -863,39 +990,51 @@ def output_destination_selector():
         note="Note: Make sure CustomCurve is closed for directly loaded profiles to appear.",
         width=70
     )
-def direct_load_success_screen(path, count):
-    clear()
-    print(sep(70))
-    print(f" {GREEN}LOADED DIRECTLY IN CUSTOMCURVE{RESET}")
-    print(sep(70))
-    print(f"\n{GREEN}✓ Loaded {count} profile(s) directly in the app.{RESET}")
-    print(f"{BLUE}Path:{RESET} {path}")
-    pause_footer("return to menu")
+def direct_load_success_screen(path, count, exe_path=None):
+    lines = [
+        ("Status", f"Loaded {count} profile(s) into CustomCurve profiles.json.", GREEN),
+        ("Profiles", path, BLUE),
+    ]
+    options = [("Return to menu", "menu")]
+    if exe_path:
+        lines.append(("App", exe_path, BLUE))
+        options.insert(0, ("Start CustomCurve", "start"))
     while True:
-        key = msvcrt.getch()
-        if key in [b'\r', b'\x1b']:
-            return
+        choice = detail_action_screen(
+            "LOADED DIRECTLY IN CUSTOMCURVE",
+            lines,
+            options,
+            title_color=GREEN
+        )
+        if choice == "start":
+            opened = open_customcurve(exe_path)
+            lines = [
+                ("Status", "CustomCurve was started." if opened else "CustomCurve could not be started.", GREEN if opened else YELLOW),
+                ("Profiles", path, BLUE),
+                ("App", exe_path, BLUE),
+            ]
+            options = [("Return to menu", "menu")]
+            continue
+        return
 def save_file_success_screen(saved_count, first_filename):
-    clear()
-    print(sep(70))
-    print(f" {GREEN}SAVED AS FILE{RESET}")
-    print(sep(70))
-    print(f"\n{GREEN}✓ Saved {saved_count} file(s).{RESET}")
+    lines = [("Status", f"Saved {saved_count} file(s).", GREEN)]
     if first_filename:
-        print(f"{BLUE}Location:{RESET} {first_filename}")
-    pause_footer("return to menu")
-    while True:
-        key = msvcrt.getch()
-        if key in [b'\r', b'\x1b']:
-            return
+        lines.append(("Location", first_filename, BLUE))
+    detail_action_screen(
+        "SAVED AS FILE",
+        lines,
+        [("Return to menu", "menu")],
+        title_color=GREEN
+    )
 def direct_load_error_screen(title, message):
-    return themed_choice_selector(
+    return detail_action_screen(
         title,
+        [("Problem", message, RED)],
         [
             ("Save it as a file instead", "file"),
             ("Return to menu", "menu"),
         ],
-        note=message,
+        title_color=RED,
         width=70
     )
 def customcurve_installed_check():
@@ -907,17 +1046,16 @@ def customcurve_installed_check():
     except Exception:
         return False
 def customcurve_not_installed_screen():
-    clear()
-    print(sep(70))
-    print(f" {RED}CUSTOMCURVE NOT FOUND{RESET}")
-    print(sep(70))
-    print(f"\n{RED}CustomCurve was not found or the folder is empty.{RESET}")
-    print(f"{BLUE}Path:{RESET} {get_customcurve_folder_path()}")
-    pause_footer("close")
-    while True:
-        key = msvcrt.getch()
-        if key in [b'\r', b'\x1b']:
-            return
+    detail_action_screen(
+        "CUSTOMCURVE NOT FOUND",
+        [
+            ("Problem", "CustomCurve was not found or the app data folder is empty.", RED),
+            ("Expected folder", get_customcurve_folder_path(), BLUE),
+        ],
+        [("Close", "menu")],
+        title_color=RED,
+        esc_text="close"
+    )
 def save_profiles_as_files(generator_profiles):
     if len(generator_profiles) == 1:
         generator, profile, default_name = generator_profiles[0]
@@ -1113,7 +1251,8 @@ def finish_generated_output(generator_profiles):
                     opened = open_customcurve(reopen_path)
                     reopened_customcurve_screen(reopen_path, opened)
                 else:
-                    direct_load_success_screen(path, len(profiles))
+                    launch_path = get_saved_customcurve_path(clean_invalid_rawaccel_path())
+                    direct_load_success_screen(path, len(profiles), launch_path)
                 return "app", path
             choice = profiles_full_screen(current_count, len(profiles))
             if choice == "file":
@@ -1238,8 +1377,10 @@ def normalize_config_values(data):
     if reduction == "safe":
         reduction = "normal"
     cleaned["point_reduction_mode"] = reduction if reduction in REDUCTION_OPTIONS else RECOMMENDED_REDUCTION
-    cleaned["smooth_transitions"] = parse_bool(data.get("smooth_transitions", False), False)
+    cleaned["smooth_transitions"] = normalize_smooth_transition_mode(data.get("smooth_transitions", RECOMMENDED_SMOOTH_TRANSITIONS))
     cleaned["rawaccel_path"] = str(data.get("rawaccel_path", "")).strip()
+    customcurve_path = str(data.get("customcurve_path", "")).strip()
+    cleaned["customcurve_path"] = resolve_customcurve_exe_path(customcurve_path) or ""
     return cleaned
 def pick_output_directory():
     try:
@@ -3703,7 +3844,7 @@ class CurveGenerator:
     def save_profile(self, profile, filename):
         with open(filename, 'w') as f:
             json.dump(profile, f, indent=2)
-        print(f"\n{GREEN}✓ Profile saved to {filename}{RESET}")
+        print(f"\n{GREEN}[OK] Profile saved to {filename}{RESET}")
 def estimate_default_max_input(mode, curve_type, cap_mode, args):
     def bounded_tail_cover(cap_x, constant_term, reference_level):
         cap_x = max(float(cap_x), 1e-9)
@@ -3794,7 +3935,7 @@ def curve_setup_selector(title, options, note=None, width=70):
         print()
         for i, option in enumerate(options):
             label, value = option
-            prefix = "➤ " if i == selected else "  "
+            prefix = menu_pointer(i == selected)
             if value == "generate":
                 print()
                 color = GREEN if i != selected else CYAN
@@ -3804,7 +3945,7 @@ def curve_setup_selector(title, options, note=None, width=70):
             print(f"{prefix}{color}{label_colored}{RESET}")
         if note:
             print(f"\n{YELLOW}{note}{RESET}")
-        print(f"\n{GRAY}Use ↑ ↓ to move | ENTER to edit/select | ESC to return to menu{RESET}")
+        print(f"\n{GRAY}Use UP/DOWN to move | ENTER to edit/select | ESC to return to menu{RESET}")
         key = msvcrt.getch()
         if key == b'\xe0':
             key = msvcrt.getch()
@@ -4097,7 +4238,7 @@ def main():
             point_count = get_output_points(last)
             point_reduction_mode = get_output_reduction(last)
             precision = get_output_precision(last)
-            smooth_transitions = get_smooth_transitions(last)
+            smooth_transitions = get_smooth_transition_mode(last)
             smooth_transition_strength = get_smooth_transition_strength(last)
             clear()
             print(sep(70))
@@ -4105,7 +4246,11 @@ def main():
             print(sep(70))
             print(f"\n{BLUE}Source:{RESET} {settings_path}")
             print(f"{BLUE}Profiles found:{RESET} {len(profiles)}")
-            print(f"\n{YELLOW}Generating CC4 profile files...{RESET}\n")
+            print(f"{BLUE}Output points:{RESET} {point_count}")
+            print(f"{BLUE}Precision:{RESET} {precision}")
+            print(f"{BLUE}Point reduction:{RESET} {format_reduction_label(point_reduction_mode)}")
+            print(f"{BLUE}Smooth transitions:{RESET} {format_smooth_transition_label(smooth_transitions)}")
+            print(f"\n{YELLOW}Building CustomCurve profile data...{RESET}\n")
             saved_count = 0
             skipped_count = 0
             generated_profiles = []
@@ -4157,7 +4302,7 @@ def main():
                         custom_right_slope=custom_right_slope
                     )
                     generated_profiles.append((generator, profile, output_profile_name))
-                    print(f"{GREEN} ✓ {raw_profile_name}: generated profile data{RESET}")
+                    print(f"{GREEN} [OK] {raw_profile_name}: generated profile data{RESET}")
                     saved_count += 1
                 except Exception:
                     import_failed = True
@@ -4195,12 +4340,20 @@ def main():
         point_count = get_output_points(last)
         point_reduction_mode = get_output_reduction(last)
         precision = get_output_precision(last)
-        smooth_transitions = get_smooth_transitions(last)
+        smooth_transitions = get_smooth_transition_mode(last)
         smooth_transition_strength = get_smooth_transition_strength(last)
         max_input = estimate_default_max_input(mode, curve_type, cap_mode, args)
         screen_header("GENERATING CURVE", 70)
-        print(f"\n{BLUE}Auto Max Input:{RESET} {max_input:.6f}".rstrip("0").rstrip("."))
-        print(f"{YELLOW}Building CC4 curve profile...{RESET}")
+        print(f"\n{BLUE}Profile:{RESET} {profile_name}")
+        print(f"{BLUE}Mode:{RESET} {mode}")
+        print(f"{BLUE}Curve type:{RESET} {curve_type.title()}")
+        print(f"{BLUE}Cap mode:{RESET} {cap_mode.upper()}")
+        print(f"{BLUE}Output points:{RESET} {point_count}")
+        print(f"{BLUE}Precision:{RESET} {precision}")
+        print(f"{BLUE}Point reduction:{RESET} {format_reduction_label(point_reduction_mode)}")
+        print(f"{BLUE}Smooth transitions:{RESET} {format_smooth_transition_label(smooth_transitions)}")
+        print(f"{BLUE}Auto max input:{RESET} {max_input:.6f}".rstrip("0").rstrip("."))
+        print(f"\n{YELLOW}Building CustomCurve profile data...{RESET}")
         generator = CurveGenerator(
             mode_name=mode,
             curve_type=curve_type,
@@ -4227,13 +4380,10 @@ def main():
             print(f" {CYAN}{x_str}{RESET} -> {GREEN}{y_str}{RESET}")
         result_type, result_value = finish_generated_output([(generator, profile, profile_name)])
         if result_type == "app":
-            print(f"\n{GREEN}✓ Loaded directly in CustomCurve.{RESET}")
-            print(f"{BLUE}Path:{RESET} {result_value}")
             filename = str(last.get("filename", "profile.cc4"))
         elif result_type == "file":
             saved_files, first_filename = result_value
             filename = first_filename or normalize_cc4_filename(profile_name)
-            print(f"\n{GREEN}✓ Saved {saved_files} file(s).{RESET}")
         else:
             filename = str(last.get("filename", "profile.cc4"))
             continue
