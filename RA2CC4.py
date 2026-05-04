@@ -226,11 +226,10 @@ LEGACY_CONFIG_PATHS = [
 POINT_OPTIONS = [32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024, 2048, 4096]
 PRECISION_OPTIONS = list(range(1, 11))
 REDUCTION_OPTIONS = ["optimal", "normal", "aggressive"]
-SMOOTH_TRANSITION_OPTIONS = ["off", "natural", "strong"]
+SMOOTH_TRANSITION_OPTIONS = ["off", "on"]
 SMOOTH_TRANSITION_STRENGTHS = {
     "off": 0.0,
-    "natural": 1.0,
-    "strong": 1.75,
+    "on": 1.0,
 }
 RECOMMENDED_POINTS = 128
 RECOMMENDED_PRECISION = 6
@@ -583,12 +582,12 @@ def format_reduction_label(value):
     return value[:1].upper() + value[1:] if value else ""
 def normalize_smooth_transition_mode(value):
     if isinstance(value, bool):
-        return "natural" if value else "off"
+        return "on" if value else "off"
     if isinstance(value, (int, float)):
-        return "natural" if value != 0 else "off"
+        return "on" if value != 0 else "off"
     text = str(value or "").strip().lower()
-    if text in ["true", "yes", "y", "on", "1"]:
-        return "natural"
+    if text in ["true", "yes", "y", "on", "1", "natural", "strong"]:
+        return "on"
     if text in ["false", "no", "n", "0"]:
         return "off"
     return text if text in SMOOTH_TRANSITION_OPTIONS else RECOMMENDED_SMOOTH_TRANSITIONS
@@ -741,7 +740,7 @@ def advanced_settings_menu():
                 save_last_config(data)
             value_choice_selector(
                 "SMOOTH TRANSITIONS",
-                [("Off", "off"), ("Natural", "natural"), ("Strong", "strong")],
+                [("Off", "off"), ("On", "on")],
                 current=get_smooth_transition_mode(last),
                 recommended="off",
                 width=70,
@@ -2788,28 +2787,6 @@ class CurveGenerator:
         if left_available <= min_width * 4.0 or right_available <= min_width * 4.0:
             return None
 
-        left_near = self._estimate_curve_slope(
-            curve,
-            center,
-            max_input,
-            side="left",
-            lower_bound=hard_left,
-            upper_bound=hard_right
-        )
-        right_near = self._estimate_curve_slope(
-            curve,
-            center,
-            max_input,
-            side="right",
-            lower_bound=hard_left,
-            upper_bound=hard_right
-        )
-        if right_near <= 0.0 or right_near <= left_near:
-            return None
-        slope_scale = max(abs(right_near), abs(left_near), y_scale / max(max_input, 1.0), 1e-12)
-        if right_near - left_near < slope_scale * 0.18:
-            return None
-
         strength = max(0.0, min(float(strength), 4.0))
         local_scale = max(abs(center), max_input * 0.02, 1.0)
         target_width = max(max_input * 0.004, local_scale * 0.06) * strength
@@ -2835,6 +2812,28 @@ class CurveGenerator:
         left_secant = (center_y - left_y) / (center - left)
         right_secant = (right_y - center_y) / (right - center)
         if left_secant <= 0.0 or right_secant <= 0.0:
+            return None
+
+        left_near = self._estimate_curve_slope(
+            curve,
+            center,
+            max_input,
+            side="left",
+            lower_bound=hard_left,
+            upper_bound=hard_right
+        )
+        right_near = self._estimate_curve_slope(
+            curve,
+            center,
+            max_input,
+            side="right",
+            lower_bound=hard_left,
+            upper_bound=hard_right
+        )
+        if right_near <= 0.0 or right_near <= left_near:
+            return None
+        slope_scale = max(abs(right_near), abs(left_near), y_scale / max(max_input, 1.0), 1e-12)
+        if right_near - left_near < slope_scale * 0.18:
             return None
         if right_secant <= left_secant * 1.08 and right_near <= left_near * 1.25:
             return None
