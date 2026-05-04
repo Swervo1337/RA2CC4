@@ -25,6 +25,10 @@ RESET = "\033[0m"
 MAX_FLOAT = 1e300
 MAX_EXPONENT = 700.0
 MIN_EXPONENT = -745.0
+RAWACCEL_POSITIVE_EPSILON = 1e-12
+RAWACCEL_MOTIVITY_MIN = 1.0 + RAWACCEL_POSITIVE_EPSILON
+RAWACCEL_CLASSIC_EXPONENT_MIN = 1.0 + RAWACCEL_POSITIVE_EPSILON
+RAWACCEL_LUT_POINTS_CAPACITY = 257
 def safe_exp(value):
     value = float(value)
     if value >= MAX_EXPONENT:
@@ -1274,20 +1278,20 @@ def safe_float(value, fallback=0.0, minimum=0.0, maximum=None):
         out = maximum
     return out
 ARG_LIMITS = {
-    "motivity": (1.0, None),
+    "motivity": (RAWACCEL_MOTIVITY_MIN, None),
     "smooth": (0.0, 1.0),
-    "sync_speed": (1e-6, None),
+    "sync_speed": (RAWACCEL_POSITIVE_EPSILON, None),
     "midpoint": (1e-6, None),
-    "scale": (1e-12, None),
-    "exponent_power": (1e-12, None),
-    "growth_rate": (None, None),
-    "gamma": (0.0, None),
+    "scale": (RAWACCEL_POSITIVE_EPSILON, None),
+    "exponent_power": (RAWACCEL_POSITIVE_EPSILON, None),
+    "growth_rate": (RAWACCEL_POSITIVE_EPSILON, None),
+    "gamma": (RAWACCEL_POSITIVE_EPSILON, None),
     "input_offset": (0.0, None),
     "output_offset": (0.0, None),
-    "acceleration": (0.0, None),
-    "decay_rate": (0.0, None),
-    "limit": (0.0, None),
-    "exponent": (0.0, None),
+    "acceleration": (RAWACCEL_POSITIVE_EPSILON, None),
+    "decay_rate": (RAWACCEL_POSITIVE_EPSILON, None),
+    "limit": (RAWACCEL_POSITIVE_EPSILON, None),
+    "exponent": (RAWACCEL_CLASSIC_EXPONENT_MIN, None),
     "cap_x": (0.0, None),
     "cap_y": (0.0, None),
 }
@@ -1499,7 +1503,7 @@ def parse_lookup_points(raw_points):
             dedup[-1] = (x, y)
         else:
             dedup.append((x, y))
-    return dedup
+    return dedup[:RAWACCEL_LUT_POINTS_CAPACITY]
 def extract_lookup_points(params):
     if not isinstance(params, dict):
         return []
@@ -1708,7 +1712,7 @@ class ClassicCurveBase:
     def __init__(self, input_offset, acceleration, exponent):
         self.offset = float(input_offset)
         self.acceleration = float(acceleration)
-        self.exponent = max(float(exponent), 1e-12)
+        self.exponent = max(float(exponent), RAWACCEL_CLASSIC_EXPONENT_MIN)
     def flat_segments(self):
         return [(0.0, self.offset, 1.0)] if self.offset > 0.0 else []
     def base_fn(self, x, accel_raised):
@@ -1811,11 +1815,11 @@ class ClassicCurveGain(ClassicCurveBase):
         return -safe_pow(y / power, 1 / (power - 1)) / (offset - x)
 class SynchronousCurveLegacy:
     def __init__(self, gamma, motivity, sync_speed, smooth):
-        self.motivity = max(float(Fraction(motivity).limit_denominator(10000)), 1e-12)
+        self.motivity = max(float(Fraction(motivity).limit_denominator(10000)), RAWACCEL_MOTIVITY_MIN)
         self.log_motivity = math.log(self.motivity)
-        self.gamma = float(Fraction(gamma).limit_denominator(10000))
-        self.gamma_const = self.gamma / self.log_motivity if abs(self.log_motivity) > 1e-12 else 0.0
-        self.sync_speed = max(float(Fraction(sync_speed).limit_denominator(10000)), 1e-12)
+        self.gamma = max(float(Fraction(gamma).limit_denominator(10000)), RAWACCEL_POSITIVE_EPSILON)
+        self.gamma_const = self.gamma / self.log_motivity
+        self.sync_speed = max(float(Fraction(sync_speed).limit_denominator(10000)), RAWACCEL_POSITIVE_EPSILON)
         self.log_syncspeed = math.log(self.sync_speed)
         smooth = max(float(Fraction(smooth).limit_denominator(10000)), 0.0)
         self.sharpness = 16.0 if smooth == 0 else 0.5 / smooth
@@ -1930,8 +1934,8 @@ class SynchronousCurveGain:
 class MotivityCurveLegacy:
     def __init__(self, growth_rate, motivity, midpoint):
         self.accel = min(safe_exp(float(growth_rate)), 1e12)
-        self.motivity = max(float(motivity), 1e-12)
-        self.midpoint = max(float(midpoint), 1e-12)
+        self.motivity = max(float(motivity), RAWACCEL_MOTIVITY_MIN)
+        self.midpoint = max(float(midpoint), RAWACCEL_POSITIVE_EPSILON)
         self.log_midpoint = math.log(self.midpoint)
         self.motivity_term = 2.0 * math.log(self.motivity)
         self.constant = -self.motivity_term / 2.0
@@ -2004,7 +2008,7 @@ class MotivityCurveGain:
                 return y / x
         return self.data[0] / self.x_start
 class LookupCurve:
-    CAPACITY = 257
+    CAPACITY = RAWACCEL_LUT_POINTS_CAPACITY
     def __init__(self, points, velocity):
         parsed = parse_lookup_points(points)
         if len(parsed) < 2:
@@ -2047,7 +2051,7 @@ class LookupCurve:
         return (y / max(self.points[0][0], 1e-12)) if self.velocity else y
 class PowerCurveBase:
     def __init__(self, output_offset, scale, exponent_power, cap_mode, cap_x, cap_y, gain_curve):
-        self.power = max(float(exponent_power), 1e-12)
+        self.power = max(float(exponent_power), RAWACCEL_POSITIVE_EPSILON)
         self.output_offset = float(output_offset)
         self.scale = float(scale)
         self.offset_x = 0.0
