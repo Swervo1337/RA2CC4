@@ -198,19 +198,25 @@ def main_menu_footer():
 def pause_footer(action="return to menu"):
     print(f"\n{GRAY}Use ENTER or ESC to {action}{RESET}")
 POINT_TENSION = "0.5"
-CONFIG_KEYS = {
+CONFIG_KEYS = (
+    "profile_name",
+    "mode",
+    "curve_type",
+    "cap_mode",
+    "args",
+    "filename",
     "rawaccel_path",
     "point_count",
     "precision",
     "point_reduction_mode",
-}
+    "smooth_transitions",
+)
 APPDATA_DIR = os.getenv("APPDATA")
 if APPDATA_DIR:
     CONFIG_DIR = os.path.join(APPDATA_DIR, "CurveGen")
 else:
     CONFIG_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
-LAST_CONFIG_FILE = CONFIG_PATH  
 LEGACY_CONFIG_PATHS = [
     os.path.join(os.getcwd(), "config.json"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json"),
@@ -221,6 +227,7 @@ REDUCTION_OPTIONS = ["optimal", "normal", "aggressive"]
 RECOMMENDED_POINTS = 128
 RECOMMENDED_PRECISION = 6
 RECOMMENDED_REDUCTION = "optimal"
+SMOOTH_TRANSITION_ON_STRENGTH = 1.0
 MODES = [
     ("Classic/Linear", True),
     ("Jump", True),
@@ -455,6 +462,7 @@ def save_last_config(data):
             existing = {}
         merged = dict(existing)
         merged.update(data)
+        merged = normalize_config_values(merged)
         clean = {
             key: merged[key]
             for key in CONFIG_KEYS
@@ -509,8 +517,14 @@ def get_output_reduction(config=None):
     if value == "safe":
         value = "normal"
     return value if value in REDUCTION_OPTIONS else RECOMMENDED_REDUCTION
-def output_settings_note(config=None):
-    return None
+def format_reduction_label(value):
+    value = str(value or "").strip().lower()
+    return value[:1].upper() + value[1:] if value else ""
+def get_smooth_transitions(config=None):
+    data = config if isinstance(config, dict) else load_last_config()
+    return parse_bool(data.get("smooth_transitions", False), False)
+def get_smooth_transition_strength(config=None):
+    return SMOOTH_TRANSITION_ON_STRENGTH if get_smooth_transitions(config) else 0.0
 def pick_rawaccel_folder():
     try:
         root = tk.Tk()
@@ -528,7 +542,8 @@ def advanced_settings_options(config):
         (f"Set RawAccel Path [{rawaccel_display}]", "set_rawaccel_path"),
         (f"Set Points [{get_output_points(config)}]", "set_points"),
         (f"Set Precision [{get_output_precision(config)}]", "set_precision"),
-        (f"Set Point Reduction Mode [{get_output_reduction(config)}]", "set_point_reduction"),
+        (f"Set Point Reduction Mode [{format_reduction_label(get_output_reduction(config))}]", "set_point_reduction"),
+        (f"Smooth Transitions [{'On' if get_smooth_transitions(config) else 'Off'}]", "set_smooth_transitions"),
     ]
 def advanced_settings_menu():
     while True:
@@ -536,7 +551,6 @@ def advanced_settings_menu():
         choice = themed_choice_selector(
             "ADVANCED SETTINGS",
             advanced_settings_options(last),
-            note=output_settings_note(last),
             width=70
         )
         if choice == "menu":
@@ -591,6 +605,20 @@ def advanced_settings_menu():
                 recommended=RECOMMENDED_REDUCTION,
                 width=70,
                 on_select=save_reduction
+            )
+            continue
+        if choice == "set_smooth_transitions":
+            def save_smooth_transitions(value):
+                data = clean_invalid_rawaccel_path()
+                data["smooth_transitions"] = (value == "on")
+                save_last_config(data)
+            value_choice_selector(
+                "SMOOTH TRANSITIONS",
+                [("Off", "off"), ("On", "on")],
+                current="on" if get_smooth_transitions(last) else "off",
+                recommended="off",
+                width=70,
+                on_select=save_smooth_transitions
             )
 def normalize_cc4_filename(name):
     base = (name or "").strip()
@@ -1157,10 +1185,45 @@ def nearest_allowed_int(value, options, fallback):
     except Exception:
         value = int(fallback)
     return min(options, key=lambda option: (abs(option - value), option))
+def sanitize_stored_args(args):
+    if not isinstance(args, dict):
+        return {}
+    cleaned = {}
+    for key, value in args.items():
+        if key == "lookup_points":
+            cleaned[key] = parse_lookup_points(value)
+        elif key == "lut_velocity":
+            cleaned[key] = parse_bool(value, True)
+        elif key in ARG_LIMITS:
+            min_value, max_value = get_arg_limits(key)
+            cleaned[key] = safe_float(value, 0.0, min_value, max_value)
+    return cleaned
 def normalize_config_values(data):
     if not isinstance(data, dict):
         data = {}
     cleaned = {}
+    if "profile_name" in data:
+        cleaned["profile_name"] = str(data.get("profile_name") or "New Profile")
+    if "mode" in data:
+        mode = str(data.get("mode", "")).strip().lower()
+        if mode == "import from settings.json":
+            cleaned["mode"] = mode
+        else:
+            mapped_mode = map_rawaccel_mode(mode)
+            if mapped_mode in ["natural", "classic/linear", "jump", "synchronous", "motivity (1.6.1)", "power", "lut"]:
+                cleaned["mode"] = mapped_mode
+    if "curve_type" in data:
+        curve_type = str(data.get("curve_type", "gain")).strip().lower()
+        if curve_type in ["legacy", "gain"]:
+            cleaned["curve_type"] = curve_type
+    if "cap_mode" in data:
+        cap_mode = str(data.get("cap_mode", "out")).strip().lower()
+        if cap_mode in ["out", "in", "io"]:
+            cleaned["cap_mode"] = cap_mode
+    if "args" in data:
+        cleaned["args"] = sanitize_stored_args(data.get("args"))
+    if "filename" in data:
+        cleaned["filename"] = str(data.get("filename") or "profile.cc4")
     cleaned["point_count"] = nearest_allowed_int(
         data.get("point_count", RECOMMENDED_POINTS),
         POINT_OPTIONS,
@@ -1175,6 +1238,7 @@ def normalize_config_values(data):
     if reduction == "safe":
         reduction = "normal"
     cleaned["point_reduction_mode"] = reduction if reduction in REDUCTION_OPTIONS else RECOMMENDED_REDUCTION
+    cleaned["smooth_transitions"] = parse_bool(data.get("smooth_transitions", False), False)
     cleaned["rawaccel_path"] = str(data.get("rawaccel_path", "")).strip()
     return cleaned
 def pick_output_directory():
@@ -1946,12 +2010,124 @@ class PowerCurveGain(PowerCurveBase):
         else:
             out = self.cap_y_eff + self.ieee_divide(self.constant_b, x)
         return out
+class TransitionSmoothedCurve:
+    def __init__(self, curve, transitions):
+        self.curve = curve
+        self.transitions = sorted(transitions, key=lambda transition: transition["left"])
+
+    def __call__(self, x):
+        x = float(x)
+        for transition in self.transitions:
+            left = transition["left"]
+            right = transition["right"]
+            if x < left:
+                break
+            if x > right:
+                continue
+            tol = max((right - left) * 1e-12, 1e-12)
+            if x <= left + tol or x >= right - tol:
+                return self.curve(x)
+            if "center" in transition:
+                center = transition["center"]
+                if abs(x - center) <= tol:
+                    return transition["center_y"]
+                if x < center:
+                    return self._hermite(
+                        x,
+                        left,
+                        center,
+                        transition["left_y"],
+                        transition["center_y"],
+                        transition["left_slope"],
+                        transition["center_slope"]
+                    )
+                return self._hermite(
+                    x,
+                    center,
+                    right,
+                    transition["center_y"],
+                    transition["right_y"],
+                    transition["center_slope"],
+                    transition["right_slope"]
+                )
+            return self._hermite(
+                x,
+                left,
+                right,
+                transition["left_y"],
+                transition["right_y"],
+                transition["left_slope"],
+                transition["right_slope"]
+            )
+        return self.curve(x)
+
+    @staticmethod
+    def _hermite(x, left, right, left_y, right_y, left_slope, right_slope):
+        dx = right - left
+        if dx <= 0.0:
+            return left_y
+        t = (x - left) / dx
+        t2 = t * t
+        t3 = t2 * t
+        h00 = 2.0 * t3 - 3.0 * t2 + 1.0
+        h10 = t3 - 2.0 * t2 + t
+        h01 = -2.0 * t3 + 3.0 * t2
+        h11 = t3 - t2
+        return (
+            h00 * left_y
+            + h10 * dx * left_slope
+            + h01 * right_y
+            + h11 * dx * right_slope
+        )
+
+    def flat_segments(self):
+        if not hasattr(self.curve, "flat_segments"):
+            return []
+        try:
+            return self.curve.flat_segments()
+        except Exception:
+            return []
+
+    def transition_anchors(self):
+        anchors = []
+        for transition in self.transitions:
+            left = transition["left"]
+            right = transition["right"]
+            width = right - left
+            if width <= 0.0:
+                continue
+            if "center" in transition:
+                center = transition["center"]
+                left_width = center - left
+                right_width = right - center
+                anchors.extend([left, center, right])
+                if left_width > 0.0:
+                    anchors.extend([
+                        left + left_width * 0.45,
+                        left + left_width * 0.75,
+                    ])
+                if right_width > 0.0:
+                    anchors.extend([
+                        center + right_width * 0.25,
+                        center + right_width * 0.60,
+                    ])
+                continue
+            anchors.extend([left, left + width * 0.35, left + width * 0.70, right])
+        return anchors
 class CurveGenerator:
-    def __init__(self, mode_name="natural", curve_type="legacy", cap_mode="out", point_reduction_mode="optimal"):
+    def __init__(
+        self,
+        mode_name="natural",
+        curve_type="legacy",
+        cap_mode="out",
+        point_reduction_mode="optimal",
+        smooth_transition_strength=0.0
+    ):
         self.mode_name = mode_name.lower()
         self.curve_type = curve_type.lower()
         self.cap_mode = cap_mode.lower()
         self.point_reduction_mode = (point_reduction_mode or "off").lower()
+        self.smooth_transition_strength = max(0.0, finite_value(smooth_transition_strength, 0.0))
         if self.curve_type not in ["legacy", "gain"]:
             raise ValueError("curve_type must be 'legacy' or 'gain'")
     def _build_curve(self, args):
@@ -2206,6 +2382,441 @@ class CurveGenerator:
             add(float(cap_breakpoint) * 1.02)
         return sorted(anchors)
 
+    def _flat_segments_for_transition_smoothing(self, curve, max_input, precision=6):
+        flat_segments = self._exact_flat_segments(curve, max_input)
+        for segment in self._rounded_flat_segments(curve, max_input, precision=precision):
+            if not any(
+                abs(segment[0] - existing[0]) <= 1e-10 and abs(segment[1] - existing[1]) <= 1e-10
+                for existing in flat_segments
+            ):
+                flat_segments.append(segment)
+        min_length = max(float(max_input) * 1e-5, 1e-5)
+        filtered_segments = []
+        for start_x, end_x, y in flat_segments:
+            start_x = float(start_x)
+            end_x = float(end_x)
+            if math.isfinite(end_x):
+                if end_x <= start_x or end_x - start_x < min_length:
+                    continue
+            filtered_segments.append((start_x, end_x, y))
+        return filtered_segments
+
+    def _transition_hard_anchors(self, args, max_input, flat_segments=None):
+        anchors = {0.0, float(max_input)}
+        def add(value):
+            try:
+                value = float(value)
+            except Exception:
+                return
+            if math.isfinite(value) and 0.0 <= value <= max_input:
+                anchors.add(value)
+        if self.mode_name in ["classic/linear", "natural"]:
+            add(args.get("input_offset", 0.0))
+        if self.mode_name == "jump":
+            add(args.get("cap_x", 15.0))
+        if self.mode_name == "synchronous":
+            add(args.get("sync_speed", 5.0))
+        if self.mode_name == "motivity (1.6.1)":
+            add(args.get("midpoint", 5.0))
+        if self.mode_name == "power":
+            add(self._power_offset_breakpoint(args) or 0.0)
+        cap_breakpoint = self._special_breakpoint(args)
+        if cap_breakpoint is not None:
+            add(cap_breakpoint)
+        if self.mode_name == "lut":
+            for x, _ in parse_lookup_points(args.get("lookup_points", [])):
+                add(x)
+        for start_x, end_x, _ in flat_segments or []:
+            add(start_x)
+            add(end_x)
+        return sorted(anchors)
+
+    def _transition_smoothing_y_scale(self, curve, max_input, protected=None):
+        samples = {0.0, float(max_input)}
+        for i in range(65):
+            t = i / 64.0
+            samples.add(max_input * t)
+            samples.add(max_input * (t ** 2.0))
+        for x in protected or []:
+            try:
+                x = float(x)
+                if math.isfinite(x) and 0.0 <= x <= max_input:
+                    samples.add(x)
+            except Exception:
+                pass
+        values = []
+        for x in sorted(samples):
+            try:
+                y = float(curve(x))
+            except Exception:
+                continue
+            if math.isfinite(y):
+                values.append(y)
+        if not values:
+            return 1.0
+        return max(max(values) - min(values), max(abs(y) for y in values), 1.0)
+
+    def _estimate_curve_slope(self, curve, x, max_input, side="right", lower_bound=0.0, upper_bound=None):
+        x = float(x)
+        max_input = max(float(max_input), 0.0)
+        lower_bound = max(float(lower_bound), 0.0)
+        upper_bound = max_input if upper_bound is None else min(float(upper_bound), max_input)
+        h = max(max_input * 1e-5, abs(x) * 1e-5, 1e-6)
+
+        if side == "left":
+            x0 = max(lower_bound, x - h)
+            x1 = x
+        elif side == "central":
+            x0 = max(lower_bound, x - h)
+            x1 = min(upper_bound, x + h)
+        else:
+            x0 = x
+            x1 = min(upper_bound, x + h)
+            if x1 <= x0:
+                x0 = max(lower_bound, x - h)
+                x1 = x
+
+        if x1 <= x0:
+            return 0.0
+        try:
+            slope = (float(curve(x1)) - float(curve(x0))) / (x1 - x0)
+        except Exception:
+            return 0.0
+        return slope if math.isfinite(slope) else 0.0
+
+    def _build_flat_exit_transition(
+        self,
+        curve,
+        boundary,
+        max_input,
+        protected,
+        y_scale,
+        precision=6,
+        strength=1.0
+    ):
+        boundary = max(0.0, min(float(boundary), float(max_input)))
+        if boundary >= max_input:
+            return None
+
+        protected_right = [
+            float(x)
+            for x in protected
+            if math.isfinite(float(x)) and float(x) > boundary + max(max_input * 1e-9, 1e-9)
+        ]
+        hard_right = min(protected_right) if protected_right else float(max_input)
+        available = hard_right - boundary
+        min_width = max(max_input * 1e-5, 1e-5)
+        if available <= min_width * 4.0:
+            return None
+
+        strength = max(0.0, min(float(strength), 4.0))
+        local_scale = max(abs(boundary), max_input * 0.02, 1.0)
+        target_width = max(max_input * 0.004, local_scale * 0.08) * strength
+        width = min(available * 0.55, max(target_width, min_width * 4.0))
+        if width <= min_width:
+            return None
+
+        left = boundary
+        right = boundary + width
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+        except Exception:
+            return None
+        if not math.isfinite(left_y) or not math.isfinite(right_y):
+            return None
+
+        y_epsilon = max(10.0 ** -(int(precision) + 1), y_scale * 1e-7, 1e-10)
+        if right_y <= left_y + y_epsilon:
+            return None
+
+        probe_dx = max(min(width * 0.03, available * 0.03), max_input * 1e-7, 1e-7)
+        probe_x = min(right, boundary + probe_dx)
+        try:
+            probe_y = float(curve(probe_x))
+        except Exception:
+            return None
+        if not math.isfinite(probe_y):
+            return None
+        if probe_y - left_y > max((right_y - left_y) * 0.60, y_scale * 0.08):
+            return None
+
+        linear_start = min(right, boundary + probe_dx)
+        if right - linear_start > min_width:
+            try:
+                if self._safe_is_linear_segment(curve, linear_start, right, precision=precision):
+                    return None
+            except Exception:
+                pass
+
+        secant = (right_y - left_y) / width
+        if secant <= 0.0:
+            return None
+
+        right_slope = self._estimate_curve_slope(
+            curve,
+            right,
+            max_input,
+            side="right",
+            lower_bound=left,
+            upper_bound=hard_right
+        )
+        if right_slope <= 0.0:
+            right_slope = self._estimate_curve_slope(
+                curve,
+                right,
+                max_input,
+                side="left",
+                lower_bound=left,
+                upper_bound=hard_right
+            )
+        if right_slope <= secant * 0.10:
+            return None
+
+        return {
+            "left": left,
+            "right": right,
+            "left_y": left_y,
+            "right_y": right_y,
+            "left_slope": 0.0,
+            "right_slope": max(0.0, min(right_slope, secant * 3.0)),
+        }
+
+    def _transition_candidate_points(self, args, max_input, flat_segments):
+        candidates = set(self._transition_hard_anchors(args, max_input, flat_segments))
+        return sorted(
+            float(x)
+            for x in candidates
+            if math.isfinite(float(x)) and 0.0 < float(x) < max_input
+        )
+
+    @staticmethod
+    def _clamp_monotone_slope(slope, secant):
+        slope = finite_value(slope, 0.0)
+        secant = finite_value(secant, 0.0)
+        if abs(secant) <= 1e-15:
+            return 0.0
+        if secant > 0.0:
+            return max(0.0, min(slope, secant * 3.0))
+        return min(0.0, max(slope, secant * 3.0))
+
+    @staticmethod
+    def _pchip_join_slope(left_dx, right_dx, left_secant, right_secant):
+        if left_dx <= 0.0 or right_dx <= 0.0:
+            return 0.0
+        if left_secant <= 0.0 or right_secant <= 0.0:
+            return 0.0
+        w1 = 2.0 * right_dx + left_dx
+        w2 = right_dx + 2.0 * left_dx
+        denom = (w1 / right_secant) + (w2 / left_secant)
+        if denom <= 0.0:
+            return 0.0
+        return (w1 + w2) / denom
+
+    def _build_slope_knee_transition(
+        self,
+        curve,
+        center,
+        max_input,
+        protected,
+        y_scale,
+        precision=6,
+        strength=1.0
+    ):
+        center = float(center)
+        max_input = max(float(max_input), 0.0)
+        if center <= 0.0 or center >= max_input:
+            return None
+
+        gap = max(max_input * 1e-9, 1e-9)
+        left_protected = [
+            float(x)
+            for x in protected
+            if math.isfinite(float(x)) and float(x) < center - gap
+        ]
+        right_protected = [
+            float(x)
+            for x in protected
+            if math.isfinite(float(x)) and float(x) > center + gap
+        ]
+        hard_left = max(left_protected) if left_protected else 0.0
+        hard_right = min(right_protected) if right_protected else max_input
+        left_available = center - hard_left
+        right_available = hard_right - center
+        min_width = max(max_input * 1e-5, 1e-5)
+        if left_available <= min_width * 4.0 or right_available <= min_width * 4.0:
+            return None
+
+        left_near = self._estimate_curve_slope(
+            curve,
+            center,
+            max_input,
+            side="left",
+            lower_bound=hard_left,
+            upper_bound=hard_right
+        )
+        right_near = self._estimate_curve_slope(
+            curve,
+            center,
+            max_input,
+            side="right",
+            lower_bound=hard_left,
+            upper_bound=hard_right
+        )
+        if right_near <= 0.0 or right_near <= left_near:
+            return None
+        slope_scale = max(abs(right_near), abs(left_near), y_scale / max(max_input, 1.0), 1e-12)
+        if right_near - left_near < slope_scale * 0.18:
+            return None
+
+        strength = max(0.0, min(float(strength), 4.0))
+        local_scale = max(abs(center), max_input * 0.02, 1.0)
+        target_width = max(max_input * 0.004, local_scale * 0.06) * strength
+        left_width = min(left_available * 0.45, max(target_width, min_width * 3.0))
+        right_width = min(right_available * 0.45, max(target_width, min_width * 3.0))
+        if left_width <= min_width or right_width <= min_width:
+            return None
+
+        left = center - left_width
+        right = center + right_width
+        try:
+            left_y = float(curve(left))
+            center_y = float(curve(center))
+            right_y = float(curve(right))
+        except Exception:
+            return None
+        if not all(math.isfinite(y) for y in (left_y, center_y, right_y)):
+            return None
+        y_epsilon = max(10.0 ** -(int(precision) + 1), y_scale * 1e-7, 1e-10)
+        if center_y <= left_y + y_epsilon or right_y <= center_y + y_epsilon:
+            return None
+
+        left_secant = (center_y - left_y) / (center - left)
+        right_secant = (right_y - center_y) / (right - center)
+        if left_secant <= 0.0 or right_secant <= 0.0:
+            return None
+        if right_secant <= left_secant * 1.08 and right_near <= left_near * 1.25:
+            return None
+
+        left_slope = self._estimate_curve_slope(
+            curve,
+            left,
+            max_input,
+            side="central",
+            lower_bound=hard_left,
+            upper_bound=center
+        )
+        right_slope = self._estimate_curve_slope(
+            curve,
+            right,
+            max_input,
+            side="central",
+            lower_bound=center,
+            upper_bound=hard_right
+        )
+        center_slope = self._pchip_join_slope(
+            center - left,
+            right - center,
+            left_secant,
+            right_secant
+        )
+        center_slope = min(center_slope, left_secant * 3.0, right_secant * 3.0)
+
+        return {
+            "left": left,
+            "center": center,
+            "right": right,
+            "left_y": left_y,
+            "center_y": center_y,
+            "right_y": right_y,
+            "left_slope": self._clamp_monotone_slope(left_slope, left_secant),
+            "center_slope": max(0.0, center_slope),
+            "right_slope": self._clamp_monotone_slope(right_slope, right_secant),
+        }
+
+    @staticmethod
+    def _transition_overlaps(existing_transitions, candidate):
+        left = candidate["left"]
+        right = candidate["right"]
+        for transition in existing_transitions:
+            if left < transition["right"] and right > transition["left"]:
+                return True
+        return False
+
+    def _apply_transition_smoothing(self, curve, args, max_input, precision=6):
+        strength = max(0.0, finite_value(self.smooth_transition_strength, 0.0))
+        if strength <= 0.0 or max_input <= 0.0:
+            return curve
+
+        flat_segments = self._flat_segments_for_transition_smoothing(curve, max_input, precision=precision)
+        protected = set(self._transition_hard_anchors(args, max_input, flat_segments))
+        flat_tail_start = self._safe_find_flat_tail_start(curve, max_input, precision=precision)
+        if flat_tail_start is not None:
+            protected.add(float(flat_tail_start))
+
+        y_scale = self._transition_smoothing_y_scale(curve, max_input, protected=protected)
+        transitions = []
+        flat_boundaries = set()
+        for start_x, end_x, _ in sorted(flat_segments, key=lambda segment: (segment[0], segment[1])):
+            try:
+                start_x = float(start_x)
+                end_x = float(end_x)
+            except Exception:
+                continue
+            flat_boundaries.add(round(start_x, 10))
+            if math.isfinite(end_x):
+                flat_boundaries.add(round(end_x, 10))
+            if not math.isfinite(end_x) or end_x <= start_x or end_x >= max_input:
+                continue
+            transition = self._build_flat_exit_transition(
+                curve,
+                end_x,
+                max_input,
+                protected,
+                y_scale,
+                precision=precision,
+                strength=strength
+            )
+            if transition is None:
+                continue
+            if self._transition_overlaps(transitions, transition):
+                continue
+            transitions.append(transition)
+
+        for center in self._transition_candidate_points(args, max_input, flat_segments):
+            if round(float(center), 10) in flat_boundaries:
+                continue
+            transition = self._build_slope_knee_transition(
+                curve,
+                center,
+                max_input,
+                protected,
+                y_scale,
+                precision=precision,
+                strength=strength
+            )
+            if transition is None:
+                continue
+            if self._transition_overlaps(transitions, transition):
+                continue
+            transitions.append(transition)
+
+        if not transitions:
+            return curve
+        return TransitionSmoothedCurve(curve, transitions)
+
+    def _transition_smoothing_anchors(self, curve):
+        if not hasattr(curve, "transition_anchors"):
+            return []
+        try:
+            return [
+                float(x)
+                for x in curve.transition_anchors()
+                if math.isfinite(float(x))
+            ]
+        except Exception:
+            return []
+
     def _adaptive_effective_max_input(self, curve, max_input, precision=6):
         max_input = max(float(max_input), 0.0)
         if max_input <= 0:
@@ -2236,6 +2847,7 @@ class CurveGenerator:
             return [0.0]
         precision = int(precision)
         anchors = set(self._adaptive_anchors(args, max_input))
+        anchors.update(self._transition_smoothing_anchors(curve))
         if protected:
             for x in protected:
                 try:
@@ -2268,6 +2880,8 @@ class CurveGenerator:
         result.add(0.0)
         result.add(max_input)
         for x in self._adaptive_anchors(args, max_input):
+            result.add(x)
+        for x in self._transition_smoothing_anchors(curve):
             result.add(x)
         if protected:
             for x in protected:
@@ -2818,6 +3432,7 @@ class CurveGenerator:
         points = []
         max_input = max(float(max_input), 0.0)
         original_max_input = max_input
+        curve = self._apply_transition_smoothing(curve, args, original_max_input, precision=precision)
         effective_max_input = self._safe_effective_end_x(curve, max_input, precision=precision)
         max_input = max(effective_max_input, 0.0)
         if self.mode_name == "lut":
@@ -2829,6 +3444,9 @@ class CurveGenerator:
                     protected = set()
                     if x_values:
                         protected.update({x_values[0], x_values[-1]})
+                    transition_anchors = self._transition_smoothing_anchors(curve)
+                    protected.update(transition_anchors)
+                    x_values = sorted(set(float(x) for x in x_values + transition_anchors))
                     x_values = self._resolve_mode_x_values(
                         curve,
                         x_values,
@@ -2861,6 +3479,9 @@ class CurveGenerator:
                 protected = set(float(x) for x, _ in lut_points)
                 if sampled_x:
                     protected.update({sampled_x[0], sampled_x[-1]})
+                transition_anchors = self._transition_smoothing_anchors(curve)
+                protected.update(transition_anchors)
+                sampled_x = sorted(set(float(x) for x in sampled_x + transition_anchors))
                 sampled_x = self._resolve_mode_x_values(
                     curve,
                     sampled_x,
@@ -2889,6 +3510,9 @@ class CurveGenerator:
         else:
             x_values = self._breakpoint_aware_x_values(point_count, max_input, cap_breakpoint)
         protected = {0.0, max_input, original_max_input}
+        transition_anchors = self._transition_smoothing_anchors(curve)
+        protected.update(transition_anchors)
+        x_values = sorted(set(float(x) for x in x_values + transition_anchors))
         flat_segments = self._exact_flat_segments(curve, original_max_input)
         rounded_flat_segments = self._rounded_flat_segments(curve, original_max_input, precision=precision)
         for segment in rounded_flat_segments:
@@ -2987,6 +3611,7 @@ class CurveGenerator:
     def estimate_right_slope(self, args, max_input):
         curve = self._build_curve(args)
         x = max(float(max_input), 0.0)
+        curve = self._apply_transition_smoothing(curve, args, x, precision=6)
         h = max(1e-6, x * 1e-4)
         x0 = max(0.0, x - h)
         if abs(x - x0) <= 1e-12:
@@ -2998,6 +3623,7 @@ class CurveGenerator:
     def sample_values(self, args, max_input, precision=6):
         curve = self._build_curve(args)
         max_input = max(float(max_input), 0.0)
+        curve = self._apply_transition_smoothing(curve, args, max_input, precision=precision)
         xs = [0.0, max_input * 0.25, max_input * 0.5, max_input * 0.75, max_input]
         out = []
         for x in xs:
@@ -3471,6 +4097,8 @@ def main():
             point_count = get_output_points(last)
             point_reduction_mode = get_output_reduction(last)
             precision = get_output_precision(last)
+            smooth_transitions = get_smooth_transitions(last)
+            smooth_transition_strength = get_smooth_transition_strength(last)
             clear()
             print(sep(70))
             print(f" {CYAN}IMPORTING RAWACCEL SETTINGS{RESET}")
@@ -3515,7 +4143,8 @@ def main():
                         mode_name=mapped_mode,
                         curve_type=curve_type,
                         cap_mode=cap_mode,
-                        point_reduction_mode=point_reduction_mode
+                        point_reduction_mode=point_reduction_mode,
+                        smooth_transition_strength=smooth_transition_strength
                     )
                     custom_right_slope = generator.estimate_right_slope(args, max_input)
                     profile = generator.create_profile(
@@ -3540,18 +4169,18 @@ def main():
             result_type, result_value = finish_generated_output(generated_profiles)
             if result_type == "menu":
                 continue
+            filename = str(last.get("filename", "profile.cc4"))
             if result_type == "file":
                 saved_files, first_filename = result_value
+                filename = first_filename or filename
             save_last_config({
                 "profile_name": import_profile_name,
                 "mode": "import from settings.json",
-                "curve_type": str(last.get("curve_type", "gain")),
-                "cap_mode": str(last.get("cap_mode", "out")),
-                "args": last.get("args", {}),
-                "point_count": get_output_points(last),
-                "point_reduction_mode": get_output_reduction(last),
-                "precision": get_output_precision(last),
-                "filename": str(last.get("filename", "profile.cc4")),
+                "point_count": point_count,
+                "point_reduction_mode": point_reduction_mode,
+                "precision": precision,
+                "smooth_transitions": smooth_transitions,
+                "filename": filename,
                 "rawaccel_path": str(last.get("rawaccel_path", ""))
             })
             continue
@@ -3566,6 +4195,8 @@ def main():
         point_count = get_output_points(last)
         point_reduction_mode = get_output_reduction(last)
         precision = get_output_precision(last)
+        smooth_transitions = get_smooth_transitions(last)
+        smooth_transition_strength = get_smooth_transition_strength(last)
         max_input = estimate_default_max_input(mode, curve_type, cap_mode, args)
         screen_header("GENERATING CURVE", 70)
         print(f"\n{BLUE}Auto Max Input:{RESET} {max_input:.6f}".rstrip("0").rstrip("."))
@@ -3574,7 +4205,8 @@ def main():
             mode_name=mode,
             curve_type=curve_type,
             cap_mode=cap_mode,
-            point_reduction_mode=point_reduction_mode
+            point_reduction_mode=point_reduction_mode,
+            smooth_transition_strength=smooth_transition_strength
         )
         custom_right_slope = generator.estimate_right_slope(args, max_input)
         profile = generator.create_profile(
@@ -3614,6 +4246,7 @@ def main():
             "point_count": point_count,
             "point_reduction_mode": point_reduction_mode,
             "precision": precision,
+            "smooth_transitions": smooth_transitions,
             "filename": filename
         })
         continue
