@@ -2835,7 +2835,7 @@ class CurveGenerator:
     @staticmethod
     def _format_weight_value(value):
         value = max(0.0, min(1.0, finite_value(value, POINT_TENSION_VALUE)))
-        text = f"{value:.6f}".rstrip('0').rstrip('.')
+        text = f"{value:.10f}".rstrip('0').rstrip('.')
         return "0" if text in ["", "-0"] else text
 
     @staticmethod
@@ -2860,6 +2860,33 @@ class CurveGenerator:
             (w0 * b0 * segment["left_y"]) +
             (w1 * b1 * segment["control_y"]) +
             (w2 * b2 * segment["right_y"])
+        ) / denom
+        return x, y
+
+    @staticmethod
+    def _weighted_cubic_point(segment, t):
+        t = max(0.0, min(1.0, float(t)))
+        omt = 1.0 - t
+        b0 = omt * omt * omt
+        b1 = 3.0 * omt * omt * t
+        b2 = 3.0 * omt * t * t
+        b3 = t * t * t
+        control_basis = b1 + b2
+        w0 = POINT_TENSION_VALUE
+        w1 = max(1e-12, finite_value(segment.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE))
+        w3 = POINT_TENSION_VALUE
+        denom = (w0 * b0) + (w1 * control_basis) + (w3 * b3)
+        if abs(denom) <= 1e-300:
+            return segment["right"], segment["right_y"]
+        x = (
+            (w0 * b0 * segment["left"]) +
+            (w1 * control_basis * segment["control_x"]) +
+            (w3 * b3 * segment["right"])
+        ) / denom
+        y = (
+            (w0 * b0 * segment["left_y"]) +
+            (w1 * control_basis * segment["control_y"]) +
+            (w3 * b3 * segment["right_y"])
         ) / denom
         return x, y
 
@@ -2903,6 +2930,29 @@ class CurveGenerator:
         _, y = self._weighted_quad_point(segment, (lo + hi) * 0.5)
         return y
 
+    def _weighted_cubic_segment_y_at(self, segment, x):
+        left = segment["left"]
+        right = segment["right"]
+        left_y = segment["left_y"]
+        right_y = segment["right_y"]
+        x = max(left, min(right, float(x)))
+        if right <= left:
+            return right_y
+        if segment.get("edge"):
+            t = (x - left) / (right - left)
+            return left_y + (right_y - left_y) * t
+        lo = 0.0
+        hi = 1.0
+        for _ in range(34):
+            mid = (lo + hi) * 0.5
+            mid_x, _ = self._weighted_cubic_point(segment, mid)
+            if mid_x < x:
+                lo = mid
+            else:
+                hi = mid
+        _, y = self._weighted_cubic_point(segment, (lo + hi) * 0.5)
+        return y
+
     def _weighted_segment_x_is_monotone(self, segment):
         last_x = segment["left"]
         span = max(segment["right"] - segment["left"], 1e-12)
@@ -2914,11 +2964,22 @@ class CurveGenerator:
             last_x = x
         return last_x <= segment["right"] + tolerance
 
+    def _weighted_cubic_segment_x_is_monotone(self, segment):
+        last_x = segment["left"]
+        span = max(segment["right"] - segment["left"], 1e-12)
+        tolerance = span * 1e-7
+        for i in range(1, 33):
+            x, _ = self._weighted_cubic_point(segment, i / 32.0)
+            if not math.isfinite(x) or x < last_x - tolerance:
+                return False
+            last_x = x
+        return last_x <= segment["right"] + tolerance
+
     def _weighted_segment_error(self, curve, segment, precision=6):
         max_error = 0.0
         worst_x = (segment["left"] + segment["right"]) * 0.5
         if segment.get("edge"):
-            for x in self._weighted_segment_samples(segment["left"], segment["right"], count=25):
+            for x in self._weighted_segment_samples(segment["left"], segment["right"], count=49):
                 try:
                     actual = float(curve(x))
                     predicted = float(self._weighted_segment_y_at(segment, x))
@@ -2932,9 +2993,9 @@ class CurveGenerator:
                     worst_x = x
             return max_error, worst_x
 
-        sample_t = {i / 28.0 for i in range(29)}
-        for i in range(1, 8):
-            t = i / 8.0
+        sample_t = {i / 44.0 for i in range(45)}
+        for i in range(1, 12):
+            t = i / 12.0
             sample_t.add(t * t)
             sample_t.add(1.0 - (t * t))
         for t in sorted(sample_t):
@@ -2949,7 +3010,242 @@ class CurveGenerator:
             if error > max_error:
                 max_error = error
                 worst_x = x
+        for x in self._weighted_segment_samples(segment["left"], segment["right"], count=65):
+            try:
+                actual = float(curve(x))
+                predicted = float(self._weighted_segment_y_at(segment, x))
+            except Exception:
+                return MAX_FLOAT, worst_x
+            if not math.isfinite(actual) or not math.isfinite(predicted):
+                return MAX_FLOAT, worst_x
+            error = abs(actual - predicted)
+            if error > max_error:
+                max_error = error
+                worst_x = x
         return max_error, worst_x
+
+    def _weighted_cubic_segment_error(self, curve, segment, precision=6):
+        max_error = 0.0
+        worst_x = (segment["left"] + segment["right"]) * 0.5
+        if segment.get("edge"):
+            for x in self._weighted_segment_samples(segment["left"], segment["right"], count=49):
+                try:
+                    actual = float(curve(x))
+                    predicted = float(self._weighted_cubic_segment_y_at(segment, x))
+                except Exception:
+                    return MAX_FLOAT, worst_x
+                if not math.isfinite(actual) or not math.isfinite(predicted):
+                    return MAX_FLOAT, worst_x
+                error = abs(actual - predicted)
+                if error > max_error:
+                    max_error = error
+                    worst_x = x
+            return max_error, worst_x
+
+        sample_t = {i / 36.0 for i in range(37)}
+        for i in range(1, 10):
+            t = i / 10.0
+            sample_t.add(t * t)
+            sample_t.add(1.0 - (t * t))
+        for t in sorted(sample_t):
+            try:
+                x, predicted = self._weighted_cubic_point(segment, t)
+                actual = float(curve(x))
+            except Exception:
+                return MAX_FLOAT, worst_x
+            if not math.isfinite(x) or not math.isfinite(actual) or not math.isfinite(predicted):
+                return MAX_FLOAT, worst_x
+            error = abs(actual - predicted)
+            if error > max_error:
+                max_error = error
+                worst_x = x
+        for x in self._weighted_segment_samples(segment["left"], segment["right"], count=41):
+            try:
+                actual = float(curve(x))
+                predicted = float(self._weighted_cubic_segment_y_at(segment, x))
+            except Exception:
+                return MAX_FLOAT, worst_x
+            if not math.isfinite(actual) or not math.isfinite(predicted):
+                return MAX_FLOAT, worst_x
+            error = abs(actual - predicted)
+            if error > max_error:
+                max_error = error
+                worst_x = x
+        return max_error, worst_x
+
+    def _weighted_segment_param_error(self, curve, segment, sample_t):
+        max_error = 0.0
+        worst_x = (segment["left"] + segment["right"]) * 0.5
+        for t in sample_t:
+            try:
+                x, predicted = self._weighted_quad_point(segment, t)
+                actual = float(curve(x))
+            except Exception:
+                return MAX_FLOAT, worst_x
+            if not math.isfinite(x) or not math.isfinite(actual) or not math.isfinite(predicted):
+                return MAX_FLOAT, worst_x
+            error = abs(actual - predicted)
+            if error > max_error:
+                max_error = error
+                worst_x = x
+        return max_error, worst_x
+
+    def _weighted_cubic_segment_param_error(self, curve, segment, sample_t):
+        max_error = 0.0
+        worst_x = (segment["left"] + segment["right"]) * 0.5
+        for t in sample_t:
+            try:
+                x, predicted = self._weighted_cubic_point(segment, t)
+                actual = float(curve(x))
+            except Exception:
+                return MAX_FLOAT, worst_x
+            if not math.isfinite(x) or not math.isfinite(actual) or not math.isfinite(predicted):
+                return MAX_FLOAT, worst_x
+            error = abs(actual - predicted)
+            if error > max_error:
+                max_error = error
+                worst_x = x
+        return max_error, worst_x
+
+    def _weighted_segment_endpoint_slopes(self, segment):
+        left = float(segment["left"])
+        right = float(segment["right"])
+        left_y = float(segment["left_y"])
+        right_y = float(segment["right_y"])
+        if right <= left:
+            return 0.0, 0.0
+        if segment.get("edge"):
+            slope = (right_y - left_y) / (right - left)
+            return slope, slope
+        control_x = float(segment.get("control_x", (left + right) * 0.5))
+        control_y = float(segment.get("control_y", (left_y + right_y) * 0.5))
+        left_slope = (control_y - left_y) / (control_x - left) if abs(control_x - left) > 1e-300 else 0.0
+        right_slope = (right_y - control_y) / (right - control_x) if abs(right - control_x) > 1e-300 else 0.0
+        if not math.isfinite(left_slope):
+            left_slope = 0.0
+        if not math.isfinite(right_slope):
+            right_slope = 0.0
+        return left_slope, right_slope
+
+    def _weighted_segment_slope_penalty(self, curve, segment):
+        left = float(segment["left"])
+        right = float(segment["right"])
+        if right <= left:
+            return 0.0, None
+        seg_left_slope, seg_right_slope = self._weighted_segment_endpoint_slopes(segment)
+        target_left = self._weighted_endpoint_slope(curve, left, left, right, from_left=True)
+        target_right = self._weighted_endpoint_slope(curve, right, left, right, from_left=False)
+        if target_left is None or target_right is None:
+            return 0.0, None
+        left_delta = abs(seg_left_slope - target_left)
+        right_delta = abs(seg_right_slope - target_right)
+        span = right - left
+        penalty = max(left_delta, right_delta) * span * 0.008
+        worst_x = left + span * (0.35 if left_delta >= right_delta else 0.65)
+        return penalty if math.isfinite(penalty) else 0.0, worst_x
+
+    def _quantized_weighted_segment(self, segment, precision=6):
+        precision = int(precision)
+
+        def q_point(value):
+            return float(self._format_point_number(value, precision))
+
+        def q_weight(value):
+            return float(self._format_weight_value(value))
+
+        out = dict(segment)
+        for key in ("left", "right", "left_y", "right_y"):
+            if key in out:
+                out[key] = q_point(out[key])
+        if not out.get("edge"):
+            out["control_x"] = q_point(out.get("control_x", (out["left"] + out["right"]) * 0.5))
+            out["control_y"] = q_point(out.get("control_y", (out["left_y"] + out["right_y"]) * 0.5))
+            out["weight"] = q_weight(out.get("weight", POINT_TENSION_VALUE))
+        return out
+
+    def _finalize_weighted_segment_fit(self, curve, segment, precision=6):
+        if segment is None:
+            return None
+        quantized = self._quantized_weighted_segment(segment, precision=precision)
+        fit_error, worst_x = self._weighted_segment_error(curve, quantized, precision=precision)
+        slope_error, slope_worst_x = self._weighted_segment_slope_penalty(curve, quantized)
+        if slope_error > fit_error and slope_worst_x is not None:
+            worst_x = slope_worst_x
+        segment["fit_error"] = fit_error
+        segment["slope_error"] = slope_error
+        segment["error"] = max(fit_error, slope_error)
+        segment["worst_x"] = worst_x
+        return segment
+
+    def _finalize_weighted_cubic_segment_fit(self, curve, segment, precision=6):
+        if segment is None:
+            return None
+        quantized = self._quantized_weighted_segment(segment, precision=precision)
+        fit_error, worst_x = self._weighted_cubic_segment_error(curve, quantized, precision=precision)
+        slope_error, slope_worst_x = self._weighted_segment_slope_penalty(curve, quantized)
+        slope_error *= 0.35
+        if slope_error > fit_error and slope_worst_x is not None:
+            worst_x = slope_worst_x
+        segment["fit_error"] = fit_error
+        segment["slope_error"] = slope_error
+        segment["error"] = max(fit_error, slope_error)
+        segment["worst_x"] = worst_x
+        return segment
+
+    def _normalized_reduction_mode(self):
+        mode = str(self.point_reduction_mode or "optimal").strip().lower()
+        if mode == "safe":
+            mode = "normal"
+        return mode if mode in ["optimal", "normal", "aggressive"] else "optimal"
+
+    def _weighted_reduction_policy(self):
+        mode = self._normalized_reduction_mode()
+        if mode == "normal":
+            return {
+                "point_scale": 0.70,
+                "min_points": 8,
+                "tolerance_scale": 1.25,
+                "spread_scale": 1.40,
+                "spread_cap": 0.32,
+                "tie_slack_scale": 2.00,
+            }
+        if mode == "aggressive":
+            return {
+                "point_scale": 0.45,
+                "min_points": 6,
+                "tolerance_scale": 2.50,
+                "spread_scale": 2.00,
+                "spread_cap": 0.44,
+                "tie_slack_scale": 3.20,
+            }
+        return {
+            "point_scale": 1.0,
+            "min_points": 2,
+            "tolerance_scale": 0.35,
+            "spread_scale": 1.0,
+            "spread_cap": 0.22,
+            "tie_slack_scale": 1.0,
+        }
+
+    def _weighted_point_budget(self, point_count):
+        point_count = max(2, int(point_count))
+        policy = self._weighted_reduction_policy()
+        scaled = int(round(point_count * float(policy["point_scale"])))
+        return max(2, min(point_count, max(int(policy["min_points"]), scaled)))
+
+    def _weighted_cubic_point_budget(self, point_count):
+        point_count = max(2, int(point_count))
+        mode = self._normalized_reduction_mode()
+        if mode == "normal":
+            scale = 0.32
+            minimum = 10
+        elif mode == "aggressive":
+            scale = 0.24
+            minimum = 8
+        else:
+            scale = 0.40
+            minimum = 14
+        return max(2, min(point_count, max(minimum, int(round(point_count * scale)))))
 
     def _weighted_fit_tolerance(self, curve, x_values, precision=6, protected=None):
         precision = int(precision)
@@ -2978,11 +3274,11 @@ class CurveGenerator:
         if not values:
             return 0.00008, 1.0
         y_scale = max(max(values) - min(values), max(abs(y) for y in values), 1.0)
-        tolerance = max(10.0 ** -(precision + 1) * 8.0, y_scale * 8e-6, 0.00008)
+        tolerance = max(10.0 ** -(precision + 1) * 8.0, y_scale * 1e-6, 10.0 ** -max(precision, 1) * 0.5)
         return tolerance, y_scale
 
     def _weighted_reference_ratios(self, curve, left, right):
-        ratios = [0.5, 0.25, 0.75, 1.0 / 3.0, 2.0 / 3.0]
+        ratios = [0.5, 0.20, 0.35, 0.65, 0.80]
         try:
             left_y = float(curve(left))
             right_y = float(curve(right))
@@ -3056,8 +3352,13 @@ class CurveGenerator:
         }
         if not self._weighted_segment_x_is_monotone(segment):
             return None
-        error, worst_x = self._weighted_segment_error(curve, segment, precision=precision)
-        segment["error"] = error
+        fit_error, worst_x = self._weighted_segment_error(curve, segment, precision=precision)
+        slope_error, slope_worst_x = self._weighted_segment_slope_penalty(curve, segment)
+        if slope_error > fit_error and slope_worst_x is not None:
+            worst_x = slope_worst_x
+        segment["fit_error"] = fit_error
+        segment["slope_error"] = slope_error
+        segment["error"] = max(fit_error, slope_error)
         segment["worst_x"] = worst_x
         return segment
 
@@ -3075,12 +3376,12 @@ class CurveGenerator:
         return out
 
     @staticmethod
-    def _weighted_candidate_tie_slack(precision=6, y_scale=1.0):
+    def _weighted_candidate_tie_slack(precision=6, y_scale=1.0, tie_slack_scale=1.0):
         precision = int(precision)
-        fit_tolerance = max(10.0 ** -(precision + 1) * 8.0, float(y_scale) * 8e-6, 0.00008)
-        return max(fit_tolerance * 0.035, 1e-10)
+        fit_tolerance = max(10.0 ** -(precision + 1) * 8.0, float(y_scale) * 1e-6, 10.0 ** -max(precision, 1) * 0.5)
+        return max(fit_tolerance * 0.18 * max(float(tie_slack_scale), 0.0), 1e-10)
 
-    def _weighted_target_spread(self, curve, left, right, left_y, right_y, y_scale):
+    def _weighted_target_spread(self, curve, left, right, left_y, right_y, y_scale, spread_scale=1.0, spread_cap=0.22):
         if right <= left:
             return 0.0
         try:
@@ -3095,76 +3396,240 @@ class CurveGenerator:
         bow = min(abs(mid_y - line_mid_y) / local_scale, 1.0)
         if bow <= 1e-7:
             return 0.0
-        return min(0.22, 0.035 + 0.185 * math.sqrt(bow))
+        spread_cap = max(0.0, min(0.49, float(spread_cap)))
+        return min(spread_cap, (0.035 + 0.185 * math.sqrt(bow)) * max(float(spread_scale), 0.0))
 
-    @staticmethod
-    def _weighted_candidate_preference(segment, target_spread):
-        weight = max(0.0, min(1.0, finite_value(segment.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)))
-        spread = abs(weight - POINT_TENSION_VALUE)
-        return abs(spread - max(0.0, min(0.22, float(target_spread))))
-
-    def _weighted_candidate_is_better(self, candidate, current, target_spread, precision=6, y_scale=1.0):
+    def _weighted_candidate_is_better(
+        self,
+        candidate,
+        current,
+        target_spread,
+        precision=6,
+        y_scale=1.0,
+        tie_slack_scale=1.0,
+        spread_cap=0.22
+    ):
         if candidate is None:
             return False
         if current is None:
             return True
         candidate_error = finite_value(candidate.get("error", MAX_FLOAT), MAX_FLOAT)
         current_error = finite_value(current.get("error", MAX_FLOAT), MAX_FLOAT)
-        tie_slack = self._weighted_candidate_tie_slack(precision, y_scale)
-        if candidate_error < current_error - tie_slack:
+        tie_slack = self._weighted_candidate_tie_slack(precision, y_scale, tie_slack_scale=tie_slack_scale)
+        epsilon = 1e-15 if max(float(tie_slack_scale), 0.0) <= 0.0 else max(1e-15, tie_slack)
+        if candidate_error < current_error - epsilon:
             return True
-        if candidate_error > current_error + tie_slack:
+        if candidate_error > current_error + epsilon:
             return False
-        candidate_preference = self._weighted_candidate_preference(candidate, target_spread)
-        current_preference = self._weighted_candidate_preference(current, target_spread)
-        if candidate_preference < current_preference - 1e-12:
-            return True
-        if abs(candidate_preference - current_preference) <= 1e-12:
-            return candidate_error < current_error
-        return False
+        if max(float(tie_slack_scale), 0.0) > 0.0:
+            candidate_weight = max(0.0, min(1.0, finite_value(candidate.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)))
+            current_weight = max(0.0, min(1.0, finite_value(current.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)))
+            candidate_strength = abs(candidate_weight - POINT_TENSION_VALUE)
+            current_strength = abs(current_weight - POINT_TENSION_VALUE)
+            candidate_span = abs(float(candidate.get("right", 0.0)) - float(candidate.get("left", 0.0)))
+            if candidate_span >= 8.0 and candidate_strength <= 0.42 and current_strength <= 0.42:
+                if candidate_strength > current_strength + 1e-10:
+                    return True
+                if candidate_strength < current_strength - 1e-10:
+                    return False
+        return candidate_error < current_error
 
-    def _refine_weighted_candidate_segment(self, curve, left, right, best, y_scale, precision=6, target_spread=0.0):
-        if best is None or best.get("edge"):
-            return best
-        refined = best
-        ratio = finite_value(refined.get("fit_ratio", 0.5), 0.5)
-        weight = finite_value(refined.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)
-        passes = (
-            (0.055, 0.100, 4, 5),
-            (0.025, 0.045, 4, 5),
-            (0.010, 0.018, 4, 5),
-            (0.004, 0.007, 4, 5),
-            (0.0016, 0.0025, 3, 4),
-        )
-        for ratio_step, weight_step, ratio_radius, weight_radius in passes:
-            improved = refined
-            for candidate_ratio in self._weighted_search_values(ratio, ratio_step, 0.08, 0.92, radius=ratio_radius):
-                for candidate_weight in self._weighted_search_values(weight, weight_step, 0.0, 1.0, radius=weight_radius):
-                    segment = self._make_weighted_candidate_segment(
-                        curve,
-                        left,
-                        right,
-                        candidate_ratio,
-                        candidate_weight,
-                        y_scale,
-                        precision=precision
-                    )
-                    if segment is None:
-                        continue
-                    if self._weighted_candidate_is_better(
-                        segment,
-                        improved,
-                        target_spread,
-                        precision=precision,
-                        y_scale=y_scale
-                    ):
-                        improved = segment
-            refined = improved
-            ratio = finite_value(refined.get("fit_ratio", ratio), ratio)
-            weight = finite_value(refined.get("weight", weight), weight)
-        return refined
+    def _make_direct_weighted_segment(self, curve, left, right, control_x, control_y, weight, y_scale, precision=6, fit_ratio=0.5):
+        left = float(left)
+        right = float(right)
+        if right <= left:
+            return None
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+        except Exception:
+            return None
+        span = right - left
+        control_x = max(left + span * 1e-6, min(right - span * 1e-6, float(control_x)))
+        control_y = float(control_y)
+        weight = max(1e-9, min(1.0, float(weight)))
+        if not all(math.isfinite(v) for v in [left_y, right_y, control_x, control_y, weight]):
+            return None
+        if control_y < -max(float(y_scale) * 0.02, 0.001):
+            return None
+        segment = {
+            "left": left,
+            "right": right,
+            "left_y": left_y,
+            "right_y": right_y,
+            "control_x": control_x,
+            "control_y": control_y,
+            "weight": weight,
+            "fit_ratio": max(0.0, min(1.0, float(fit_ratio))),
+            "edge": False,
+            "locked": False,
+        }
+        if not self._weighted_segment_x_is_monotone(segment):
+            return None
+        fit_error, worst_x = self._weighted_segment_error(curve, segment, precision=precision)
+        slope_error, slope_worst_x = self._weighted_segment_slope_penalty(curve, segment)
+        if slope_error > fit_error and slope_worst_x is not None:
+            worst_x = slope_worst_x
+        segment["fit_error"] = fit_error
+        segment["slope_error"] = slope_error
+        segment["error"] = max(fit_error, slope_error)
+        segment["worst_x"] = worst_x
+        return segment
 
-    def _fit_weighted_quadratic_segment(self, curve, left, right, precision=6, y_scale=1.0, refine_weights=True):
+    def _make_lsq_weighted_segment(self, curve, left, right, control_x, weight, y_scale, sample_t, precision=6):
+        left = float(left)
+        right = float(right)
+        if right <= left:
+            return None
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+        except Exception:
+            return None
+        span = right - left
+        control_x = max(left + span * 1e-6, min(right - span * 1e-6, float(control_x)))
+        weight = max(1e-9, min(1.0, float(weight)))
+        if not math.isfinite(control_x) or not math.isfinite(weight):
+            return None
+
+        numerator = 0.0
+        denominator = 0.0
+        w0 = POINT_TENSION_VALUE
+        w2 = POINT_TENSION_VALUE
+        for t in sample_t:
+            t = max(0.0, min(1.0, float(t)))
+            omt = 1.0 - t
+            b0 = omt * omt
+            b1 = 2.0 * omt * t
+            b2 = t * t
+            denom = (w0 * b0) + (weight * b1) + (w2 * b2)
+            if abs(denom) <= 1e-300:
+                continue
+            x = ((w0 * b0 * left) + (weight * b1 * control_x) + (w2 * b2 * right)) / denom
+            try:
+                actual = float(curve(x))
+            except Exception:
+                return None
+            if not math.isfinite(actual):
+                return None
+            base_y = ((w0 * b0 * left_y) + (w2 * b2 * right_y)) / denom
+            control_factor = (weight * b1) / denom
+            numerator += (actual - base_y) * control_factor
+            denominator += control_factor * control_factor
+        if denominator <= 1e-300:
+            return None
+        control_y = numerator / denominator
+        if not math.isfinite(control_y):
+            return None
+        if control_y < -max(float(y_scale) * 0.02, 0.001):
+            return None
+        segment = {
+            "left": left,
+            "right": right,
+            "left_y": left_y,
+            "right_y": right_y,
+            "control_x": control_x,
+            "control_y": control_y,
+            "weight": weight,
+            "fit_ratio": (control_x - left) / span,
+            "edge": False,
+            "locked": False,
+        }
+        if not self._weighted_segment_x_is_monotone(segment):
+            return None
+        fit_error, worst_x = self._weighted_segment_param_error(curve, segment, sample_t)
+        slope_error, slope_worst_x = self._weighted_segment_slope_penalty(curve, segment)
+        if slope_error > fit_error and slope_worst_x is not None:
+            worst_x = slope_worst_x
+        segment["fit_error"] = fit_error
+        segment["slope_error"] = slope_error
+        segment["error"] = max(fit_error, slope_error)
+        segment["worst_x"] = worst_x
+        return segment
+
+    def _make_lsq_weighted_cubic_segment(self, curve, left, right, control_x, weight, y_scale, precision=6):
+        left = float(left)
+        right = float(right)
+        if right <= left:
+            return None
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+        except Exception:
+            return None
+        span = right - left
+        control_x = max(left + span * 1e-6, min(right - span * 1e-6, float(control_x)))
+        weight = max(1e-9, min(1.0, float(weight)))
+        if not math.isfinite(control_x) or not math.isfinite(weight):
+            return None
+
+        sample_t = sorted(set(
+            [i / 20.0 for i in range(1, 20)] +
+            [0.02, 0.04, 0.08, 0.12, 0.88, 0.92, 0.96, 0.98]
+        ))
+        numerator = 0.0
+        denominator = 0.0
+        endpoint_weight = POINT_TENSION_VALUE
+        for t in sample_t:
+            t = max(0.0, min(1.0, float(t)))
+            omt = 1.0 - t
+            b0 = omt * omt * omt
+            control_basis = (3.0 * omt * omt * t) + (3.0 * omt * t * t)
+            b3 = t * t * t
+            denom = (endpoint_weight * b0) + (weight * control_basis) + (endpoint_weight * b3)
+            if abs(denom) <= 1e-300:
+                continue
+            x = (
+                (endpoint_weight * b0 * left) +
+                (weight * control_basis * control_x) +
+                (endpoint_weight * b3 * right)
+            ) / denom
+            if x < left - span * 1e-7 or x > right + span * 1e-7:
+                return None
+            try:
+                actual = float(curve(x))
+            except Exception:
+                return None
+            if not math.isfinite(actual):
+                return None
+            base_y = ((endpoint_weight * b0 * left_y) + (endpoint_weight * b3 * right_y)) / denom
+            control_factor = (weight * control_basis) / denom
+            numerator += (actual - base_y) * control_factor
+            denominator += control_factor * control_factor
+        if denominator <= 1e-300:
+            return None
+        control_y = numerator / denominator
+        if not math.isfinite(control_y):
+            return None
+        if control_y < -max(float(y_scale) * 0.02, 0.001):
+            return None
+        segment = {
+            "left": left,
+            "right": right,
+            "left_y": left_y,
+            "right_y": right_y,
+            "control_x": control_x,
+            "control_y": control_y,
+            "weight": weight,
+            "fit_ratio": (control_x - left) / span,
+            "edge": False,
+            "locked": False,
+        }
+        if not self._weighted_cubic_segment_x_is_monotone(segment):
+            return None
+        fit_error, worst_x = self._weighted_cubic_segment_param_error(curve, segment, sample_t)
+        slope_error, slope_worst_x = self._weighted_segment_slope_penalty(curve, segment)
+        slope_error *= 0.35
+        if slope_error > fit_error and slope_worst_x is not None:
+            worst_x = slope_worst_x
+        segment["fit_error"] = fit_error
+        segment["slope_error"] = slope_error
+        segment["error"] = max(fit_error, slope_error)
+        segment["worst_x"] = worst_x
+        return segment
+
+    def _fit_weighted_cubic_segment(self, curve, left, right, precision=6, y_scale=1.0, weight_policy=None):
+        weight_policy = weight_policy or self._weighted_reduction_policy()
         left = float(left)
         right = float(right)
         try:
@@ -3195,11 +3660,386 @@ class CurveGenerator:
                 "worst_x": (left + right) * 0.5,
                 "locked": False,
             }
-        weight_candidates = (0.0, 0.05, 0.1, 0.15, 0.2, 0.25, 0.3, 0.35, 0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 1.0)
+
+        span = right - left
+        ratios = [
+            0.05, 0.10, 0.18, 0.28, 0.40, 0.50,
+            0.60, 0.72, 0.82, 0.90, 0.96
+        ]
+        left_slope = self._weighted_endpoint_slope(curve, left, left, right, from_left=True)
+        right_slope = self._weighted_endpoint_slope(curve, right, left, right, from_left=False)
+        if left_slope is not None and right_slope is not None:
+            denom = left_slope - right_slope
+            if abs(denom) > 1e-300:
+                control_x = (right_y - left_y + (left_slope * left) - (right_slope * right)) / denom
+                if math.isfinite(control_x):
+                    ratios.append((control_x - left) / span)
+        ratios.extend(self._weighted_reference_ratios(curve, left, right))
+        ratios = sorted(set(max(0.001, min(0.999, float(ratio))) for ratio in ratios))
+
+        weight_values = (
+            1e-6, 0.005, 0.02, 0.05, 0.08, 0.12,
+            0.16, 0.18, 0.19, 0.20, 0.22, 0.25,
+            0.32, 0.42, 0.50, 0.65, 0.82, 1.0
+        )
         best = None
-        target_spread = self._weighted_target_spread(curve, left, right, left_y, right_y, y_scale)
+        for ratio in ratios:
+            control_x = left + span * ratio
+            for weight in weight_values:
+                segment = self._make_lsq_weighted_cubic_segment(
+                    curve,
+                    left,
+                    right,
+                    control_x,
+                    weight,
+                    y_scale,
+                    precision=precision
+                )
+                if self._weighted_candidate_is_better(
+                    segment,
+                    best,
+                    0.0,
+                    precision=precision,
+                    y_scale=y_scale,
+                    tie_slack_scale=0.0,
+                    spread_cap=weight_policy["spread_cap"]
+                ):
+                    best = segment
+        if best is None:
+            return None
+
+        return self._finalize_weighted_cubic_segment_fit(curve, best, precision=precision)
+
+    def _fit_lsq_weighted_quadratic_segment(self, curve, left, right, y_scale, precision=6, weight_policy=None):
+        weight_policy = weight_policy or self._weighted_reduction_policy()
+        left = float(left)
+        right = float(right)
+        if right <= left:
+            return None
+        span = right - left
+        sample_t = sorted(set(
+            [i / 16.0 for i in range(1, 16)] +
+            [0.025, 0.05, 0.10, 0.90, 0.95, 0.975]
+        ))
+        ratios = [
+            0.04,
+            0.07,
+            0.11,
+            0.16,
+            0.23,
+            0.31,
+            0.40,
+            0.50,
+            0.60,
+            0.69,
+            0.77,
+            0.84,
+            0.89,
+            0.93,
+            0.96,
+        ]
+        tangent_candidates = self._make_tangent_weighted_candidates(curve, left, right, y_scale, precision=precision)
+        for segment in tangent_candidates:
+            ratio = (segment["control_x"] - left) / span
+            if 0.0 < ratio < 1.0:
+                ratios.append(ratio)
+        ratios = sorted(set(max(0.001, min(0.999, float(r))) for r in ratios))
+        best = None
+        for ratio in ratios:
+            control_x = left + span * ratio
+            for weight in self._weighted_full_range_weights():
+                segment = self._make_lsq_weighted_segment(
+                    curve,
+                    left,
+                    right,
+                    control_x,
+                    weight,
+                    y_scale,
+                    sample_t,
+                    precision=precision
+                )
+                if self._weighted_candidate_is_better(
+                    segment,
+                    best,
+                    0.0,
+                    precision=precision,
+                    y_scale=y_scale,
+                    tie_slack_scale=weight_policy["tie_slack_scale"],
+                    spread_cap=weight_policy["spread_cap"]
+                ):
+                    best = segment
+        if best is None:
+            return None
+
+        ratio = finite_value(best.get("fit_ratio", 0.5), 0.5)
+        weight = finite_value(best.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)
+        passes = (
+            (0.080, 0.180, 2, 3),
+            (0.030, 0.065, 2, 3),
+            (0.011, 0.024, 2, 2),
+            (0.0040, 0.0085, 2, 2),
+            (0.0014, 0.0030, 2, 2),
+            (0.00050, 0.0010, 1, 2),
+            (0.00018, 0.00035, 1, 2),
+        )
+        for ratio_step, weight_step, ratio_radius, weight_radius in passes:
+            improved = best
+            for candidate_ratio in self._weighted_search_values(ratio, ratio_step, 0.001, 0.999, radius=ratio_radius):
+                control_x = left + span * candidate_ratio
+                for candidate_weight in self._weighted_search_values(weight, weight_step, 1e-9, 1.0, radius=weight_radius):
+                    segment = self._make_lsq_weighted_segment(
+                        curve,
+                        left,
+                        right,
+                        control_x,
+                        candidate_weight,
+                        y_scale,
+                        sample_t,
+                        precision=precision
+                    )
+                    if self._weighted_candidate_is_better(
+                        segment,
+                        improved,
+                        0.0,
+                        precision=precision,
+                        y_scale=y_scale,
+                        tie_slack_scale=weight_policy["tie_slack_scale"],
+                        spread_cap=weight_policy["spread_cap"]
+                    ):
+                        improved = segment
+            best = improved
+            ratio = finite_value(best.get("fit_ratio", ratio), ratio)
+            weight = finite_value(best.get("weight", weight), weight)
+
+        return self._finalize_weighted_segment_fit(curve, best, precision=precision)
+
+    def _weighted_endpoint_slope(self, curve, x, left, right, from_left=True):
+        span = max(float(right) - float(left), 1e-9)
+        h = max(span * 1e-5, 1e-7)
+        try:
+            if from_left:
+                x0 = max(float(left), float(x))
+                x1 = min(float(right), x0 + h)
+                if x1 <= x0:
+                    return None
+                y0 = float(curve(x0))
+                y1 = float(curve(x1))
+            else:
+                x1 = min(float(right), float(x))
+                x0 = max(float(left), x1 - h)
+                if x1 <= x0:
+                    return None
+                y0 = float(curve(x0))
+                y1 = float(curve(x1))
+        except Exception:
+            return None
+        dx = x1 - x0
+        if abs(dx) <= 1e-300:
+            return None
+        slope = (y1 - y0) / dx
+        return slope if math.isfinite(slope) else None
+
+    def _make_tangent_weighted_candidates(self, curve, left, right, y_scale, precision=6):
+        left = float(left)
+        right = float(right)
+        if right <= left:
+            return []
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+        except Exception:
+            return []
+        left_slope = self._weighted_endpoint_slope(curve, left, left, right, from_left=True)
+        right_slope = self._weighted_endpoint_slope(curve, right, left, right, from_left=False)
+        if left_slope is None or right_slope is None or abs(left_slope - right_slope) <= 1e-12:
+            return []
+        control_denom = left_slope - right_slope
+        if abs(control_denom) <= 1e-300:
+            return []
+        control_x = (
+            right_y - left_y + (left_slope * left) - (right_slope * right)
+        ) / control_denom
+        if not math.isfinite(control_x):
+            return []
+        span = right - left
+        if control_x <= left + span * 1e-5 or control_x >= right - span * 1e-5:
+            return []
+        control_y = left_y + left_slope * (control_x - left)
+        if not math.isfinite(control_y):
+            return []
+        candidates = []
+        for weight in self._weighted_full_range_weights():
+            segment = self._make_direct_weighted_segment(
+                curve,
+                left,
+                right,
+                control_x,
+                control_y,
+                weight,
+                y_scale,
+                precision=precision,
+                fit_ratio=0.5
+            )
+            if segment is not None:
+                candidates.append(segment)
+        return candidates
+
+    @staticmethod
+    def _weighted_full_range_weights():
+        return (
+            1e-6,
+            0.002,
+            0.005,
+            0.01,
+            0.02,
+            0.035,
+            0.05,
+            0.075,
+            0.10,
+            0.15,
+            0.22,
+            0.30,
+            0.38,
+            0.46,
+            0.50,
+            0.54,
+            0.62,
+            0.70,
+            0.80,
+            0.90,
+            1.0,
+        )
+
+    def _refine_weighted_candidate_segment(self, curve, left, right, best, y_scale, precision=6, target_spread=0.0, weight_policy=None):
+        if best is None or best.get("edge"):
+            return best
+        weight_policy = weight_policy or self._weighted_reduction_policy()
+        refined = best
+        ratio = finite_value(refined.get("fit_ratio", 0.5), 0.5)
+        weight = finite_value(refined.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)
+        passes = (
+            (0.045, 0.080, 2, 3),
+            (0.014, 0.026, 2, 3),
+            (0.0042, 0.0075, 2, 2),
+            (0.0013, 0.0023, 2, 2),
+            (0.00038, 0.00070, 1, 2),
+        )
+        for ratio_step, weight_step, ratio_radius, weight_radius in passes:
+            improved = refined
+            for candidate_ratio in self._weighted_search_values(ratio, ratio_step, 0.08, 0.92, radius=ratio_radius):
+                for candidate_weight in self._weighted_search_values(weight, weight_step, 0.0, 1.0, radius=weight_radius):
+                    segment = self._make_weighted_candidate_segment(
+                        curve,
+                        left,
+                        right,
+                        candidate_ratio,
+                        candidate_weight,
+                        y_scale,
+                        precision=precision
+                    )
+                    if segment is None:
+                        continue
+                    if self._weighted_candidate_is_better(
+                        segment,
+                        improved,
+                        target_spread,
+                        precision=precision,
+                        y_scale=y_scale,
+                        tie_slack_scale=weight_policy["tie_slack_scale"],
+                        spread_cap=weight_policy["spread_cap"]
+                    ):
+                        improved = segment
+            refined = improved
+            ratio = finite_value(refined.get("fit_ratio", ratio), ratio)
+            weight = finite_value(refined.get("weight", weight), weight)
+        for weight_step in (9e-6, 3e-6, 1e-6, 3.3e-7, 1.1e-7, 3.7e-8, 1.2e-8):
+            current_x = finite_value(refined.get("control_x", (left + right) * 0.5), (left + right) * 0.5)
+            current_y = finite_value(refined.get("control_y", (refined.get("left_y", 0.0) + refined.get("right_y", 0.0)) * 0.5), 0.0)
+            current_weight = finite_value(refined.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)
+            for candidate_weight in (
+                current_weight - weight_step,
+                current_weight + weight_step,
+                current_weight - weight_step * 0.5,
+                current_weight + weight_step * 0.5,
+            ):
+                segment = self._make_direct_weighted_segment(
+                    curve,
+                    left,
+                    right,
+                    current_x,
+                    current_y,
+                    candidate_weight,
+                    y_scale,
+                    precision=precision,
+                    fit_ratio=ratio
+                )
+                if self._weighted_candidate_is_better(
+                    segment,
+                    refined,
+                    target_spread,
+                    precision=precision,
+                    y_scale=y_scale,
+                    tie_slack_scale=0.0,
+                    spread_cap=weight_policy["spread_cap"]
+                ):
+                    refined = segment
+        return refined
+
+    def _fit_weighted_quadratic_segment(self, curve, left, right, precision=6, y_scale=1.0, refine_weights=True, weight_policy=None):
+        weight_policy = weight_policy or self._weighted_reduction_policy()
+        left = float(left)
+        right = float(right)
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+        except Exception:
+            left_y = 0.0
+            right_y = 0.0
+        if right <= left:
+            return {
+                "left": left,
+                "right": right,
+                "left_y": left_y,
+                "right_y": right_y,
+                "edge": True,
+                "error": 0.0,
+                "worst_x": right,
+                "locked": True,
+            }
+        if self._segment_is_edge(curve, left, right, precision=precision):
+            return {
+                "left": left,
+                "right": right,
+                "left_y": left_y,
+                "right_y": right_y,
+                "edge": True,
+                "error": 0.0,
+                "worst_x": (left + right) * 0.5,
+                "locked": False,
+            }
+        lsq_segment = self._fit_lsq_weighted_quadratic_segment(
+            curve,
+            left,
+            right,
+            y_scale,
+            precision=precision,
+            weight_policy=weight_policy
+        )
+        if lsq_segment is not None:
+            return lsq_segment
+        best = None
+        target_spread = self._weighted_target_spread(
+            curve,
+            left,
+            right,
+            left_y,
+            right_y,
+            y_scale,
+            spread_scale=weight_policy["spread_scale"],
+            spread_cap=weight_policy["spread_cap"]
+        )
         for ratio in self._weighted_reference_ratios(curve, left, right):
-            for weight in weight_candidates:
+            for weight in self._weighted_full_range_weights():
                 segment = self._make_weighted_candidate_segment(
                     curve,
                     left,
@@ -3216,21 +4056,36 @@ class CurveGenerator:
                     best,
                     target_spread,
                     precision=precision,
-                    y_scale=y_scale
+                    y_scale=y_scale,
+                    tie_slack_scale=weight_policy["tie_slack_scale"],
+                    spread_cap=weight_policy["spread_cap"]
                 ):
                     best = segment
+        for segment in self._make_tangent_weighted_candidates(curve, left, right, y_scale, precision=precision):
+            if self._weighted_candidate_is_better(
+                segment,
+                best,
+                target_spread,
+                precision=precision,
+                y_scale=y_scale,
+                tie_slack_scale=0.0,
+                spread_cap=weight_policy["spread_cap"]
+            ):
+                best = segment
         if best is not None:
             if not refine_weights:
-                return best
-            return self._refine_weighted_candidate_segment(
+                return self._finalize_weighted_segment_fit(curve, best, precision=precision)
+            refined = self._refine_weighted_candidate_segment(
                 curve,
                 left,
                 right,
                 best,
                 y_scale,
                 precision=precision,
-                target_spread=target_spread
+                target_spread=target_spread,
+                weight_policy=weight_policy
             )
+            return self._finalize_weighted_segment_fit(curve, refined, precision=precision)
 
         midpoint = (left + right) * 0.5
         try:
@@ -3253,7 +4108,7 @@ class CurveGenerator:
         error, worst_x = self._weighted_segment_error(curve, segment, precision=precision)
         segment["error"] = error
         segment["worst_x"] = worst_x
-        return segment
+        return self._finalize_weighted_segment_fit(curve, segment, precision=precision)
 
     @staticmethod
     def _weighted_point_count(segments):
@@ -3279,7 +4134,8 @@ class CurveGenerator:
 
         return min(valid, key=rank)
 
-    def _build_weighted_segments(self, curve, anchors, point_count, precision, tolerance, y_scale, refine_weights=True):
+    def _build_weighted_segments(self, curve, anchors, point_count, precision, tolerance, y_scale, refine_weights=True, weight_policy=None):
+        weight_policy = weight_policy or self._weighted_reduction_policy()
         anchors = sorted(set(float(x) for x in anchors))
         if len(anchors) < 2:
             return None
@@ -3293,7 +4149,8 @@ class CurveGenerator:
                 right,
                 precision=precision,
                 y_scale=y_scale,
-                refine_weights=refine_weights
+                refine_weights=refine_weights,
+                weight_policy=weight_policy
             ))
         if not segments:
             return None
@@ -3328,7 +4185,8 @@ class CurveGenerator:
                 split_x,
                 precision=precision,
                 y_scale=y_scale,
-                refine_weights=refine_weights
+                refine_weights=refine_weights,
+                weight_policy=weight_policy
             )
             right_segment = self._fit_weighted_quadratic_segment(
                 curve,
@@ -3336,10 +4194,110 @@ class CurveGenerator:
                 segment["right"],
                 precision=precision,
                 y_scale=y_scale,
-                refine_weights=refine_weights
+                refine_weights=refine_weights,
+                weight_policy=weight_policy
             )
             segments[index:index + 1] = [left_segment, right_segment]
         return segments
+
+    def _build_weighted_cubic_segments(self, curve, anchors, point_count, precision, y_scale, weight_policy=None):
+        weight_policy = weight_policy or self._weighted_reduction_policy()
+        anchors = sorted(set(float(x) for x in anchors))
+        if len(anchors) < 2:
+            return None
+        segments = []
+        for left, right in zip(anchors, anchors[1:]):
+            if right <= left:
+                continue
+            segment = self._fit_weighted_cubic_segment(
+                curve,
+                left,
+                right,
+                precision=precision,
+                y_scale=y_scale,
+                weight_policy=weight_policy
+            )
+            if segment is None:
+                return None
+            segments.append(segment)
+        if not segments:
+            return None
+
+        point_count = max(2, int(point_count))
+        if self._weighted_point_count(segments) > point_count:
+            return None
+
+        domain = max(anchors[-1] - anchors[0], 1e-9)
+        min_span = domain / max(8192.0, point_count * 64.0)
+        while self._weighted_point_count(segments) + 2 <= point_count:
+            candidates = [
+                (segment.get("error", 0.0), segment["right"] - segment["left"], index)
+                for index, segment in enumerate(segments)
+                if not segment.get("edge") and not segment.get("locked") and segment["right"] - segment["left"] > min_span
+            ]
+            if not candidates:
+                break
+            _, _, index = max(candidates, key=lambda item: (item[0], item[1]))
+            segment = segments[index]
+            split_x = float(segment.get("worst_x", (segment["left"] + segment["right"]) * 0.5))
+            min_gap = max((segment["right"] - segment["left"]) * 0.08, min_span)
+            if split_x <= segment["left"] + min_gap or split_x >= segment["right"] - min_gap:
+                split_x = (segment["left"] + segment["right"]) * 0.5
+            if split_x <= segment["left"] + min_span or split_x >= segment["right"] - min_span:
+                segment["locked"] = True
+                continue
+            left_segment = self._fit_weighted_cubic_segment(
+                curve,
+                segment["left"],
+                split_x,
+                precision=precision,
+                y_scale=y_scale,
+                weight_policy=weight_policy
+            )
+            right_segment = self._fit_weighted_cubic_segment(
+                curve,
+                split_x,
+                segment["right"],
+                precision=precision,
+                y_scale=y_scale,
+                weight_policy=weight_policy
+            )
+            if left_segment is None or right_segment is None:
+                segment["locked"] = True
+                continue
+            segments[index:index + 1] = [left_segment, right_segment]
+        return segments
+
+    def _format_weighted_cubic_segments(self, segments, precision=6):
+        if not segments:
+            return []
+        entries = []
+
+        def add_entry(x, y, weight=POINT_TENSION_VALUE, edge=False):
+            entries.append({
+                "x": float(x),
+                "y": float(y),
+                "weight": max(0.0, min(1.0, finite_value(weight, POINT_TENSION_VALUE))),
+                "edge": bool(edge),
+            })
+
+        first = segments[0]
+        add_entry(first["left"], first["left_y"], POINT_TENSION_VALUE, False)
+        for segment in segments:
+            if segment.get("edge"):
+                add_entry(segment["right"], segment["right_y"], POINT_TENSION_VALUE, True)
+                continue
+            add_entry(segment["control_x"], segment["control_y"], segment["weight"], False)
+            add_entry(segment["right"], segment["right_y"], POINT_TENSION_VALUE, True)
+
+        points = []
+        for entry in entries:
+            x_str = self._format_point_number(entry["x"], precision)
+            y_str = self._format_point_number(entry["y"], precision)
+            weight_str = self._format_weight_value(entry["weight"])
+            marker = "|e" if entry["edge"] else ""
+            points.append(f"{x_str}|{y_str}|{weight_str}{marker}")
+        return points
 
     def _format_weighted_segments(self, segments, precision=6):
         if not segments:
@@ -3405,26 +4363,43 @@ class CurveGenerator:
                 cleaned_anchors.append(value)
         if len(cleaned_anchors) < 2:
             return None
+        weight_policy = self._weighted_reduction_policy()
+        weighted_point_count = self._weighted_cubic_point_budget(point_count)
         tolerance, y_scale = self._weighted_fit_tolerance(curve, domain_values, precision=precision, protected=cleaned_anchors)
-        coarse_segments = self._build_weighted_segments(
+        tolerance *= float(weight_policy["tolerance_scale"])
+        cubic_segments = self._build_weighted_cubic_segments(
             curve,
             cleaned_anchors,
-            point_count=point_count,
+            point_count=weighted_point_count,
+            precision=precision,
+            y_scale=y_scale,
+            weight_policy=weight_policy
+        )
+        if cubic_segments is not None:
+            return self._format_weighted_cubic_segments(cubic_segments, precision=precision)
+
+        weighted_point_count = self._weighted_point_budget(point_count)
+        segments = self._build_weighted_segments(
+            curve,
+            cleaned_anchors,
+            point_count=weighted_point_count,
             precision=precision,
             tolerance=tolerance,
             y_scale=y_scale,
-            refine_weights=False
+            refine_weights=True,
+            weight_policy=weight_policy
         )
-        refined_segments = self._build_weighted_segments(
-            curve,
-            cleaned_anchors,
-            point_count=point_count,
-            precision=precision,
-            tolerance=tolerance,
-            y_scale=y_scale,
-            refine_weights=True
-        )
-        segments = self._choose_weighted_segments([coarse_segments, refined_segments], tolerance)
+        if segments is None:
+            segments = self._build_weighted_segments(
+                curve,
+                cleaned_anchors,
+                point_count=weighted_point_count,
+                precision=precision,
+                tolerance=tolerance,
+                y_scale=y_scale,
+                refine_weights=False,
+                weight_policy=weight_policy
+            )
         if segments is None:
             return None
         return self._format_weighted_segments(segments, precision=precision)
@@ -3522,11 +4497,7 @@ class CurveGenerator:
                 stack.append((split_idx, right))
         return [dense_x[i] for i in sorted(keep)]
     def _resolve_mode_x_values(self, curve, x_values, point_count, precision, protected=None, preserve_below_x=0.0):
-        mode = str(self.point_reduction_mode or "optimal").strip().lower()
-        if mode == "safe":
-            mode = "normal"
-        if mode not in ["optimal", "normal", "aggressive"]:
-            mode = "optimal"
+        mode = self._normalized_reduction_mode()
 
         x_values = sorted(set(float(x) for x in x_values))
         x_values = self._safe_protect_flat_boundaries(curve, x_values, precision=precision, protected=protected)
