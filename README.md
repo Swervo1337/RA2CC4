@@ -1,175 +1,156 @@
 # RawAccel → CC4 Converter
 
-Convert RawAccel configurations into CustomCurve (.cc4) profiles using a fast, interactive CLI tool.
+Convert RawAccel curve configurations into CustomCurve `.cc4` profiles using a fast, keyboard-driven CLI tool.
 
----
+## Overview
 
-## Features
+This repository provides a Windows-native converter for RawAccel curve profiles. It reads RawAccel `settings.json`, converts supported curve types into CustomCurve-compatible profiles, and exports them as `.cc4` files or injects them directly into CustomCurve.
 
-* Supports multiple RawAccel curve types:
+## Key Features
 
-  * Classic / Linear
-  * Jump
-  * Natural
-  * Synchronous
-  * Motivity (1.6.1)
-  * Power
-  * LookUpTable (LUT)
-
-* Import directly from `settings.json`
-
-* Export as `.cc4` profile files
-
-* Directly load profiles into CustomCurve
-
-* Advanced configuration:
-
-  * Point count
-  * Precision
-  * Point reduction modes
-
-* Handles:
-
-  * Input/Output caps
-  * Gain vs Legacy modes
-  * Lookup tables
-
-* Smooth keyboard-based UI (arrow navigation)
-
----
+- Supports RawAccel curve types:
+  - Classic / Linear
+  - Jump
+  - Natural
+  - Synchronous
+  - Motivity (1.6.1)
+  - Power
+  - LookUpTable (LUT)
+- Import curves directly from RawAccel `settings.json`
+- Export profiles as `.cc4` files
+- Directly load converted profiles into CustomCurve via `%APPDATA%\CustomCurve\profiles.json`
+- Advanced configuration options:
+  - Curve point count
+  - Output precision
+  - Point reduction mode
+  - Optional weight support
+- Smooth keyboard-driven CLI with arrow-key navigation
+- Works offline and does not modify RawAccel source files
 
 ## Requirements
 
-* Windows OS
-* Python 3.10+ (only if running from source)
+- Windows OS
+- Python 3.10+ (required when running from source)
+- `tkinter` included in the Python installation for folder selection dialogs
 
-> Note: `tkinter` must be included in your Python installation (default for most installs).
-
----
+> Note: The tool uses Windows APIs and process detection, so it is designed for Windows only.
 
 ## Installation
 
-### Option 1 — Prebuilt executable (recommended)
+### Option 1 — Prebuilt executable
 
-Download and run:
+If available, run the bundled executable:
 
-```
+```powershell
 RA2CC4.exe
 ```
 
----
-
 ### Option 2 — Run from source
 
-No external dependencies required.
+No external Python dependencies are required beyond the standard library.
 
-```
+```powershell
 python RA2CC4.py
 ```
 
----
-
 ## Usage
 
-1. Launch the program
-2. Select a curve mode or import from `settings.json`
-3. Adjust curve parameters
-4. Choose output method:
-
-   * Save as `.cc4` file
-   * Load directly into CustomCurve
-
----
+1. Launch the program.
+2. Choose a RawAccel curve mode or import from `settings.json`.
+3. Configure output parameters and advanced settings.
+4. Choose an output destination:
+   - Save as `.cc4` file
+   - Load directly into CustomCurve
 
 ## Controls
 
-* ↑ ↓ → Navigate
-* ENTER → Select
-* ESC / Q → Go back / Exit
-
----
+- `↑` / `↓` — Navigate menu items
+- `ENTER` — Select
+- `ESC` / `Q` — Back / Exit
 
 ## Advanced Settings
 
-Accessible from the main menu:
+Available from the main menu:
 
-* Set RawAccel folder path
-* Configure:
-
-  * Point count
-  * Output precision
-  * Point reduction mode
-
----
+- Configure the RawAccel folder path
+- Configure the CustomCurve installation path
+- Set output point count
+- Set JSON precision
+- Set point reduction mode
+- Enable or disable weight usage
 
 ## Direct CustomCurve Integration
 
-The tool can:
+The converter can write generated profiles directly into CustomCurve's `profiles.json`.
 
-* Inject profiles directly into CustomCurve
-* Detect if the app is running
-* Prompt to safely close and reopen it
+It will:
+
+- detect if CustomCurve is running
+- prompt to close CustomCurve safely before writing
+- optionally reopen the app after updating profiles
 
 ### Limitations
 
-* Maximum of 10 profiles (CustomCurve limit)
-
----
+- CustomCurve supports up to 10 profiles in `profiles.json`
+- If the limit is reached, profiles must be saved to file instead
+- Direct injection requires CustomCurve app data to be accessible
 
 ## Output Locations
 
 ### Saved Files
 
-User-selected location when exporting manually
+Profiles saved manually are written to the user-selected output path.
 
 ### Direct App Injection
 
-```
+The tool writes directly to:
+
+```text
 %APPDATA%\CustomCurve\profiles.json
 ```
 
----
+## Configuration File
 
-## Config File
+The tool stores its configuration in:
 
-Stored at:
-
-```
+```text
 %APPDATA%\CurveGen\config.json
 ```
 
-Includes:
+Stored settings may include:
 
-* RawAccel path
-* Output preferences
-
----
+- RawAccel installation path
+- CustomCurve installation path
+- preferred point count
+- output precision
+- point reduction mode
+- weight usage mode
 
 ## Safety
 
-* Does NOT modify RawAccel
-* Only reads `settings.json`
-* No internet/network activity
-* Safe to run offline
-
----
+- Does not modify RawAccel files
+- Only reads `settings.json`
+- No internet or network activity is performed
+- Safe to run offline
 
 ## Known Limitations
 
-* Windows-only
-* Requires CustomCurve for direct loading
-* Profile limit enforced by CustomCurve
+- Windows-only due to Windows-specific process handling and CustomCurve integration
+- Direct loading into CustomCurve requires a valid CustomCurve installation
+- CustomCurve profile count is limited to 10
 
----
+## Build
+
+To create a standalone executable:
+
+```powershell
+py -m PyInstaller --onefile --console --name RA2CC4 RA2CC4.py
+```
 
 ## License
 
 MIT License — free to use, modify, and distribute.
 
----
-
 ## Disclaimer
 
-This tool is not affiliated with RawAccel or CustomCurve.
-
-Use at your own risk.
+This project is not affiliated with RawAccel or CustomCurve. Use at your own risk.
