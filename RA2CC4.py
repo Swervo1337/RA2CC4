@@ -203,6 +203,7 @@ def main_menu_footer():
 def pause_footer(action="return to menu"):
     print(f"\n{GRAY}Use ENTER or ESC to {action}{RESET}")
 POINT_TENSION = "0.5"
+POINT_TENSION_VALUE = 0.5
 CONFIG_KEYS = (
     "profile_name",
     "mode",
@@ -215,7 +216,7 @@ CONFIG_KEYS = (
     "point_count",
     "precision",
     "point_reduction_mode",
-    "smooth_transitions",
+    "use_weights",
 )
 APPDATA_DIR = os.getenv("APPDATA")
 if APPDATA_DIR:
@@ -230,15 +231,11 @@ LEGACY_CONFIG_PATHS = [
 POINT_OPTIONS = [32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024, 2048, 4096]
 PRECISION_OPTIONS = list(range(1, 11))
 REDUCTION_OPTIONS = ["optimal", "normal", "aggressive"]
-SMOOTH_TRANSITION_OPTIONS = ["off", "on"]
-SMOOTH_TRANSITION_STRENGTHS = {
-    "off": 0.0,
-    "on": 1.0,
-}
+USE_WEIGHT_OPTIONS = ["off", "on"]
 RECOMMENDED_POINTS = 128
 RECOMMENDED_PRECISION = 6
 RECOMMENDED_REDUCTION = "optimal"
-RECOMMENDED_SMOOTH_TRANSITIONS = "off"
+RECOMMENDED_USE_WEIGHTS = "on"
 MODES = [
     ("Classic/Linear", True),
     ("Jump", True),
@@ -584,26 +581,24 @@ def get_output_reduction(config=None):
 def format_reduction_label(value):
     value = str(value or "").strip().lower()
     return value[:1].upper() + value[1:] if value else ""
-def normalize_smooth_transition_mode(value):
+def normalize_use_weights_mode(value):
     if isinstance(value, bool):
         return "on" if value else "off"
     if isinstance(value, (int, float)):
         return "on" if value != 0 else "off"
     text = str(value or "").strip().lower()
-    if text in ["true", "yes", "y", "on", "1", "natural", "strong"]:
+    if text in ["true", "yes", "y", "on", "1", "weighted", "weights", "beta"]:
         return "on"
     if text in ["false", "no", "n", "0"]:
         return "off"
-    return text if text in SMOOTH_TRANSITION_OPTIONS else RECOMMENDED_SMOOTH_TRANSITIONS
-def get_smooth_transition_mode(config=None):
+    return text if text in USE_WEIGHT_OPTIONS else RECOMMENDED_USE_WEIGHTS
+def get_use_weights_mode(config=None):
     data = config if isinstance(config, dict) else load_last_config()
-    return normalize_smooth_transition_mode(data.get("smooth_transitions", RECOMMENDED_SMOOTH_TRANSITIONS))
-def get_smooth_transitions(config=None):
-    return get_smooth_transition_mode(config) != "off"
-def get_smooth_transition_strength(config=None):
-    return SMOOTH_TRANSITION_STRENGTHS.get(get_smooth_transition_mode(config), 0.0)
-def format_smooth_transition_label(value):
-    mode = normalize_smooth_transition_mode(value)
+    return normalize_use_weights_mode(data.get("use_weights", RECOMMENDED_USE_WEIGHTS))
+def get_use_weights(config=None):
+    return get_use_weights_mode(config) == "on"
+def format_use_weights_label(value):
+    mode = normalize_use_weights_mode(value)
     return mode[:1].upper() + mode[1:] if mode else "Off"
 def pick_rawaccel_folder():
     try:
@@ -662,7 +657,7 @@ def advanced_settings_options(config):
         (f"Set Points [{get_output_points(config)}]", "set_points"),
         (f"Set Precision [{get_output_precision(config)}]", "set_precision"),
         (f"Set Point Reduction Mode [{format_reduction_label(get_output_reduction(config))}]", "set_point_reduction"),
-        (f"Smooth Transitions [{format_smooth_transition_label(get_smooth_transition_mode(config))}]", "set_smooth_transitions"),
+        (f"Use Weights [{format_use_weights_label(get_use_weights_mode(config))}]", "set_use_weights"),
     ]
 def advanced_settings_menu():
     while True:
@@ -737,18 +732,18 @@ def advanced_settings_menu():
                 on_select=save_reduction
             )
             continue
-        if choice == "set_smooth_transitions":
-            def save_smooth_transitions(value):
+        if choice == "set_use_weights":
+            def save_use_weights(value):
                 data = clean_invalid_rawaccel_path()
-                data["smooth_transitions"] = value
+                data["use_weights"] = value
                 save_last_config(data)
             value_choice_selector(
-                "SMOOTH TRANSITIONS",
-                [("Off", "off"), ("On", "on")],
-                current=get_smooth_transition_mode(last),
-                recommended="off",
+                "USE WEIGHTS",
+                [("On", "on"), ("Off", "off")],
+                current=get_use_weights_mode(last),
+                recommended=RECOMMENDED_USE_WEIGHTS,
                 width=70,
-                on_select=save_smooth_transitions
+                on_select=save_use_weights
             )
 def normalize_cc4_filename(name):
     base = (name or "").strip()
@@ -1380,7 +1375,7 @@ def normalize_config_values(data):
     if reduction == "safe":
         reduction = "normal"
     cleaned["point_reduction_mode"] = reduction if reduction in REDUCTION_OPTIONS else RECOMMENDED_REDUCTION
-    cleaned["smooth_transitions"] = normalize_smooth_transition_mode(data.get("smooth_transitions", RECOMMENDED_SMOOTH_TRANSITIONS))
+    cleaned["use_weights"] = normalize_use_weights_mode(data.get("use_weights", RECOMMENDED_USE_WEIGHTS))
     cleaned["rawaccel_path"] = str(data.get("rawaccel_path", "")).strip()
     customcurve_path = str(data.get("customcurve_path", "")).strip()
     cleaned["customcurve_path"] = resolve_customcurve_exe_path(customcurve_path) or ""
@@ -2154,110 +2149,6 @@ class PowerCurveGain(PowerCurveBase):
         else:
             out = self.cap_y_eff + self.ieee_divide(self.constant_b, x)
         return out
-class TransitionSmoothedCurve:
-    def __init__(self, curve, transitions):
-        self.curve = curve
-        self.transitions = sorted(transitions, key=lambda transition: transition["left"])
-
-    def __call__(self, x):
-        x = float(x)
-        for transition in self.transitions:
-            left = transition["left"]
-            right = transition["right"]
-            if x < left:
-                break
-            if x > right:
-                continue
-            tol = max((right - left) * 1e-12, 1e-12)
-            if x <= left + tol or x >= right - tol:
-                return self.curve(x)
-            if "center" in transition:
-                center = transition["center"]
-                if abs(x - center) <= tol:
-                    return transition["center_y"]
-                if x < center:
-                    return self._hermite(
-                        x,
-                        left,
-                        center,
-                        transition["left_y"],
-                        transition["center_y"],
-                        transition["left_slope"],
-                        transition["center_slope"]
-                    )
-                return self._hermite(
-                    x,
-                    center,
-                    right,
-                    transition["center_y"],
-                    transition["right_y"],
-                    transition["center_slope"],
-                    transition["right_slope"]
-                )
-            return self._hermite(
-                x,
-                left,
-                right,
-                transition["left_y"],
-                transition["right_y"],
-                transition["left_slope"],
-                transition["right_slope"]
-            )
-        return self.curve(x)
-
-    @staticmethod
-    def _hermite(x, left, right, left_y, right_y, left_slope, right_slope):
-        dx = right - left
-        if dx <= 0.0:
-            return left_y
-        t = (x - left) / dx
-        t2 = t * t
-        t3 = t2 * t
-        h00 = 2.0 * t3 - 3.0 * t2 + 1.0
-        h10 = t3 - 2.0 * t2 + t
-        h01 = -2.0 * t3 + 3.0 * t2
-        h11 = t3 - t2
-        return (
-            h00 * left_y
-            + h10 * dx * left_slope
-            + h01 * right_y
-            + h11 * dx * right_slope
-        )
-
-    def flat_segments(self):
-        if not hasattr(self.curve, "flat_segments"):
-            return []
-        try:
-            return self.curve.flat_segments()
-        except Exception:
-            return []
-
-    def transition_anchors(self):
-        anchors = []
-        for transition in self.transitions:
-            left = transition["left"]
-            right = transition["right"]
-            width = right - left
-            if width <= 0.0:
-                continue
-            if "center" in transition:
-                center = transition["center"]
-                left_width = center - left
-                right_width = right - center
-                anchors.extend([left, center, right])
-                if left_width > 0.0:
-                    anchors.extend([
-                        left + left_width * 0.45,
-                        left + left_width * 0.75,
-                    ])
-                if right_width > 0.0:
-                    anchors.extend([
-                        center + right_width * 0.25,
-                        center + right_width * 0.60,
-                    ])
-                continue
-            anchors.extend([left, left + width * 0.35, left + width * 0.70, right])
-        return anchors
 class CurveGenerator:
     def __init__(
         self,
@@ -2265,13 +2156,13 @@ class CurveGenerator:
         curve_type="legacy",
         cap_mode="out",
         point_reduction_mode="optimal",
-        smooth_transition_strength=0.0
+        use_weights=False
     ):
         self.mode_name = mode_name.lower()
         self.curve_type = curve_type.lower()
         self.cap_mode = cap_mode.lower()
         self.point_reduction_mode = (point_reduction_mode or "off").lower()
-        self.smooth_transition_strength = max(0.0, finite_value(smooth_transition_strength, 0.0))
+        self.use_weights = bool(use_weights)
         if self.curve_type not in ["legacy", "gain"]:
             raise ValueError("curve_type must be 'legacy' or 'gain'")
     def _build_curve(self, args):
@@ -3374,6 +3265,544 @@ class CurveGenerator:
 
         return points
 
+    @staticmethod
+    def _format_point_number(value, precision=6):
+        text = f"{float(value):.{int(precision)}f}".rstrip('0').rstrip('.')
+        return "0" if text in ["", "-0"] else text
+
+    @staticmethod
+    def _format_weight_value(value):
+        value = max(0.0, min(1.0, finite_value(value, POINT_TENSION_VALUE)))
+        text = f"{value:.6f}".rstrip('0').rstrip('.')
+        return "0" if text in ["", "-0"] else text
+
+    @staticmethod
+    def _weighted_quad_point(segment, t):
+        t = max(0.0, min(1.0, float(t)))
+        omt = 1.0 - t
+        b0 = omt * omt
+        b1 = 2.0 * omt * t
+        b2 = t * t
+        w0 = POINT_TENSION_VALUE
+        w1 = max(1e-6, finite_value(segment.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE))
+        w2 = POINT_TENSION_VALUE
+        denom = (w0 * b0) + (w1 * b1) + (w2 * b2)
+        if abs(denom) <= 1e-300:
+            return segment["right"], segment["right_y"]
+        x = (
+            (w0 * b0 * segment["left"]) +
+            (w1 * b1 * segment["control_x"]) +
+            (w2 * b2 * segment["right"])
+        ) / denom
+        y = (
+            (w0 * b0 * segment["left_y"]) +
+            (w1 * b1 * segment["control_y"]) +
+            (w2 * b2 * segment["right_y"])
+        ) / denom
+        return x, y
+
+    def _weighted_segment_samples(self, left, right, count=33):
+        left = float(left)
+        right = float(right)
+        if right <= left:
+            return [left]
+        span = right - left
+        samples = {left, right}
+        for i in range(1, count):
+            t = i / count
+            samples.add(left + span * t)
+        for i in range(1, 9):
+            t = i / 9.0
+            near = span * t * t
+            samples.add(left + near)
+            samples.add(right - near)
+        return sorted(x for x in samples if left <= x <= right)
+
+    def _weighted_segment_y_at(self, segment, x):
+        left = segment["left"]
+        right = segment["right"]
+        left_y = segment["left_y"]
+        right_y = segment["right_y"]
+        x = max(left, min(right, float(x)))
+        if right <= left:
+            return right_y
+        if segment.get("edge"):
+            t = (x - left) / (right - left)
+            return left_y + (right_y - left_y) * t
+        lo = 0.0
+        hi = 1.0
+        for _ in range(40):
+            mid = (lo + hi) * 0.5
+            mid_x, _ = self._weighted_quad_point(segment, mid)
+            if mid_x < x:
+                lo = mid
+            else:
+                hi = mid
+        _, y = self._weighted_quad_point(segment, (lo + hi) * 0.5)
+        return y
+
+    def _weighted_segment_x_is_monotone(self, segment):
+        last_x = segment["left"]
+        span = max(segment["right"] - segment["left"], 1e-12)
+        tolerance = span * 1e-7
+        for i in range(1, 33):
+            x, _ = self._weighted_quad_point(segment, i / 32.0)
+            if not math.isfinite(x) or x < last_x - tolerance:
+                return False
+            last_x = x
+        return last_x <= segment["right"] + tolerance
+
+    def _weighted_segment_error(self, curve, segment, precision=6):
+        max_error = 0.0
+        worst_x = (segment["left"] + segment["right"]) * 0.5
+        if segment.get("edge"):
+            for x in self._weighted_segment_samples(segment["left"], segment["right"], count=25):
+                try:
+                    actual = float(curve(x))
+                    predicted = float(self._weighted_segment_y_at(segment, x))
+                except Exception:
+                    return MAX_FLOAT, worst_x
+                if not math.isfinite(actual) or not math.isfinite(predicted):
+                    return MAX_FLOAT, worst_x
+                error = abs(actual - predicted)
+                if error > max_error:
+                    max_error = error
+                    worst_x = x
+            return max_error, worst_x
+
+        sample_t = {i / 28.0 for i in range(29)}
+        for i in range(1, 8):
+            t = i / 8.0
+            sample_t.add(t * t)
+            sample_t.add(1.0 - (t * t))
+        for t in sorted(sample_t):
+            try:
+                x, predicted = self._weighted_quad_point(segment, t)
+                actual = float(curve(x))
+            except Exception:
+                return MAX_FLOAT, worst_x
+            if not math.isfinite(x) or not math.isfinite(actual) or not math.isfinite(predicted):
+                return MAX_FLOAT, worst_x
+            error = abs(actual - predicted)
+            if error > max_error:
+                max_error = error
+                worst_x = x
+        return max_error, worst_x
+
+    def _weighted_fit_tolerance(self, curve, x_values, precision=6, protected=None):
+        precision = int(precision)
+        sample_x = set(float(x) for x in x_values)
+        if sample_x:
+            left = min(sample_x)
+            right = max(sample_x)
+            span = max(right - left, 0.0)
+            for i in range(65):
+                t = i / 64.0
+                sample_x.add(left + span * t)
+                sample_x.add(left + span * t * t)
+        for x in protected or []:
+            try:
+                sample_x.add(float(x))
+            except Exception:
+                pass
+        values = []
+        for x in sorted(sample_x):
+            try:
+                y = float(curve(x))
+            except Exception:
+                continue
+            if math.isfinite(y):
+                values.append(y)
+        if not values:
+            return 0.00008, 1.0
+        y_scale = max(max(values) - min(values), max(abs(y) for y in values), 1.0)
+        tolerance = max(10.0 ** -(precision + 1) * 8.0, y_scale * 8e-6, 0.00008)
+        return tolerance, y_scale
+
+    def _weighted_reference_ratios(self, curve, left, right):
+        ratios = [0.5, 0.25, 0.75, 1.0 / 3.0, 2.0 / 3.0]
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+            max_error = -1.0
+            best_ratio = 0.5
+            for i in range(1, 16):
+                ratio = i / 16.0
+                x = left + (right - left) * ratio
+                actual = float(curve(x))
+                expected = left_y + (right_y - left_y) * ratio
+                error = abs(actual - expected)
+                if error > max_error:
+                    max_error = error
+                    best_ratio = ratio
+            ratios.append(best_ratio)
+        except Exception:
+            pass
+        out = []
+        for ratio in ratios:
+            ratio = max(0.08, min(0.92, float(ratio)))
+            if not any(abs(ratio - existing) <= 1e-6 for existing in out):
+                out.append(ratio)
+        return out
+
+    def _make_weighted_candidate_segment(self, curve, left, right, ratio, weight, y_scale, precision=6):
+        left = float(left)
+        right = float(right)
+        if right <= left:
+            return None
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+            sample_x = left + (right - left) * ratio
+            sample_y = float(curve(sample_x))
+        except Exception:
+            return None
+        if not all(math.isfinite(v) for v in [left_y, right_y, sample_x, sample_y]):
+            return None
+        ratio = max(0.08, min(0.92, float(ratio)))
+        weight = max(0.01, min(1.0, float(weight)))
+        omt = 1.0 - ratio
+        b0 = omt * omt
+        b1 = 2.0 * omt * ratio
+        b2 = ratio * ratio
+        influence = weight * b1
+        if influence <= 1e-12:
+            return None
+        endpoint_left = POINT_TENSION_VALUE * b0
+        endpoint_right = POINT_TENSION_VALUE * b2
+        denom = endpoint_left + influence + endpoint_right
+        control_x = (sample_x * denom - endpoint_left * left - endpoint_right * right) / influence
+        control_y = (sample_y * denom - endpoint_left * left_y - endpoint_right * right_y) / influence
+        if not math.isfinite(control_x) or not math.isfinite(control_y):
+            return None
+        span = right - left
+        if control_x <= left + span * 1e-5 or control_x >= right - span * 1e-5:
+            return None
+        if control_y < -max(y_scale * 0.02, 0.001):
+            return None
+        segment = {
+            "left": left,
+            "right": right,
+            "left_y": left_y,
+            "right_y": right_y,
+            "control_x": control_x,
+            "control_y": control_y,
+            "weight": weight,
+            "fit_ratio": ratio,
+            "edge": False,
+            "locked": False,
+        }
+        if not self._weighted_segment_x_is_monotone(segment):
+            return None
+        error, worst_x = self._weighted_segment_error(curve, segment, precision=precision)
+        segment["error"] = error
+        segment["worst_x"] = worst_x
+        return segment
+
+    @staticmethod
+    def _weighted_search_values(center, step, low, high, radius=3):
+        values = [center]
+        for offset in range(1, int(radius) + 1):
+            values.append(center - step * offset)
+            values.append(center + step * offset)
+        out = []
+        for value in values:
+            value = max(float(low), min(float(high), float(value)))
+            if not any(abs(value - existing) <= 1e-9 for existing in out):
+                out.append(value)
+        return out
+
+    def _refine_weighted_candidate_segment(self, curve, left, right, best, y_scale, precision=6):
+        if best is None or best.get("edge"):
+            return best
+        refined = best
+        ratio = finite_value(refined.get("fit_ratio", 0.5), 0.5)
+        weight = finite_value(refined.get("weight", POINT_TENSION_VALUE), POINT_TENSION_VALUE)
+        passes = (
+            (0.055, 0.100),
+            (0.025, 0.045),
+            (0.010, 0.018),
+            (0.004, 0.007),
+        )
+        for ratio_step, weight_step in passes:
+            improved = refined
+            for candidate_ratio in self._weighted_search_values(ratio, ratio_step, 0.08, 0.92, radius=2):
+                for candidate_weight in self._weighted_search_values(weight, weight_step, 0.01, 1.0, radius=3):
+                    segment = self._make_weighted_candidate_segment(
+                        curve,
+                        left,
+                        right,
+                        candidate_ratio,
+                        candidate_weight,
+                        y_scale,
+                        precision=precision
+                    )
+                    if segment is None:
+                        continue
+                    if segment["error"] < improved["error"]:
+                        improved = segment
+            refined = improved
+            ratio = finite_value(refined.get("fit_ratio", ratio), ratio)
+            weight = finite_value(refined.get("weight", weight), weight)
+        return refined
+
+    def _fit_weighted_quadratic_segment(self, curve, left, right, precision=6, y_scale=1.0, refine_weights=True):
+        left = float(left)
+        right = float(right)
+        try:
+            left_y = float(curve(left))
+            right_y = float(curve(right))
+        except Exception:
+            left_y = 0.0
+            right_y = 0.0
+        if right <= left:
+            return {
+                "left": left,
+                "right": right,
+                "left_y": left_y,
+                "right_y": right_y,
+                "edge": True,
+                "error": 0.0,
+                "worst_x": right,
+                "locked": True,
+            }
+        if self._segment_is_edge(curve, left, right, precision=precision):
+            return {
+                "left": left,
+                "right": right,
+                "left_y": left_y,
+                "right_y": right_y,
+                "edge": True,
+                "error": 0.0,
+                "worst_x": (left + right) * 0.5,
+                "locked": False,
+            }
+        weight_candidates = (0.02, 0.04, 0.06, 0.09, 0.12, 0.18, 0.25, 0.35, 0.5, 0.65, 0.8, 1.0)
+        best = None
+        for ratio in self._weighted_reference_ratios(curve, left, right):
+            for weight in weight_candidates:
+                segment = self._make_weighted_candidate_segment(
+                    curve,
+                    left,
+                    right,
+                    ratio,
+                    weight,
+                    y_scale,
+                    precision=precision
+                )
+                if segment is None:
+                    continue
+                if best is None or segment["error"] < best["error"]:
+                    best = segment
+        if best is not None:
+            if not refine_weights:
+                return best
+            return self._refine_weighted_candidate_segment(
+                curve,
+                left,
+                right,
+                best,
+                y_scale,
+                precision=precision
+            )
+
+        midpoint = (left + right) * 0.5
+        try:
+            midpoint_y = float(curve(midpoint))
+        except Exception:
+            midpoint_y = (left_y + right_y) * 0.5
+        control_y = (midpoint_y * 0.5 - 0.125 * (left_y + right_y)) / 0.25
+        segment = {
+            "left": left,
+            "right": right,
+            "left_y": left_y,
+            "right_y": right_y,
+            "control_x": midpoint,
+            "control_y": control_y,
+            "weight": POINT_TENSION_VALUE,
+            "fit_ratio": 0.5,
+            "edge": False,
+            "locked": False,
+        }
+        error, worst_x = self._weighted_segment_error(curve, segment, precision=precision)
+        segment["error"] = error
+        segment["worst_x"] = worst_x
+        return segment
+
+    @staticmethod
+    def _weighted_point_count(segments):
+        return 1 + sum(1 if segment.get("edge") else 2 for segment in segments)
+
+    @staticmethod
+    def _weighted_segments_max_error(segments):
+        if not segments:
+            return MAX_FLOAT
+        return max(finite_value(segment.get("error", 0.0), MAX_FLOAT) for segment in segments)
+
+    def _choose_weighted_segments(self, candidates, tolerance):
+        valid = [segments for segments in candidates if segments]
+        if not valid:
+            return None
+
+        def rank(segments):
+            max_error = self._weighted_segments_max_error(segments)
+            point_count = self._weighted_point_count(segments)
+            if max_error <= tolerance:
+                return (0, point_count, max_error)
+            return (1, max_error, point_count)
+
+        return min(valid, key=rank)
+
+    def _build_weighted_segments(self, curve, anchors, point_count, precision, tolerance, y_scale, refine_weights=True):
+        anchors = sorted(set(float(x) for x in anchors))
+        if len(anchors) < 2:
+            return None
+        segments = []
+        for left, right in zip(anchors, anchors[1:]):
+            if right <= left:
+                continue
+            segments.append(self._fit_weighted_quadratic_segment(
+                curve,
+                left,
+                right,
+                precision=precision,
+                y_scale=y_scale,
+                refine_weights=refine_weights
+            ))
+        if not segments:
+            return None
+        point_count = max(2, int(point_count))
+        if self._weighted_point_count(segments) > point_count:
+            return None
+
+        domain = max(anchors[-1] - anchors[0], 1e-9)
+        min_span = domain / max(8192.0, point_count * 64.0)
+        while self._weighted_point_count(segments) + 2 <= point_count:
+            candidates = [
+                (segment.get("error", 0.0), index)
+                for index, segment in enumerate(segments)
+                if not segment.get("edge") and not segment.get("locked") and segment["right"] - segment["left"] > min_span
+            ]
+            if not candidates:
+                break
+            error, index = max(candidates, key=lambda item: item[0])
+            if error <= tolerance:
+                break
+            segment = segments[index]
+            split_x = float(segment.get("worst_x", (segment["left"] + segment["right"]) * 0.5))
+            min_gap = max((segment["right"] - segment["left"]) * 0.08, min_span)
+            if split_x <= segment["left"] + min_gap or split_x >= segment["right"] - min_gap:
+                split_x = (segment["left"] + segment["right"]) * 0.5
+            if split_x <= segment["left"] + min_span or split_x >= segment["right"] - min_span:
+                segment["locked"] = True
+                continue
+            left_segment = self._fit_weighted_quadratic_segment(
+                curve,
+                segment["left"],
+                split_x,
+                precision=precision,
+                y_scale=y_scale,
+                refine_weights=refine_weights
+            )
+            right_segment = self._fit_weighted_quadratic_segment(
+                curve,
+                split_x,
+                segment["right"],
+                precision=precision,
+                y_scale=y_scale,
+                refine_weights=refine_weights
+            )
+            segments[index:index + 1] = [left_segment, right_segment]
+        return segments
+
+    def _format_weighted_segments(self, segments, precision=6):
+        if not segments:
+            return []
+        entries = []
+
+        def add_entry(x, y, weight=POINT_TENSION_VALUE, edge=False):
+            entries.append({
+                "x": float(x),
+                "y": float(y),
+                "weight": max(0.0, min(1.0, finite_value(weight, POINT_TENSION_VALUE))),
+                "edge": bool(edge),
+            })
+
+        first = segments[0]
+        add_entry(first["left"], first["left_y"], POINT_TENSION_VALUE, False)
+        for segment in segments:
+            if segment.get("edge"):
+                add_entry(segment["right"], segment["right_y"], POINT_TENSION_VALUE, True)
+                continue
+            add_entry(segment["control_x"], segment["control_y"], segment["weight"], False)
+            add_entry(segment["right"], segment["right_y"], POINT_TENSION_VALUE, False)
+
+        points = []
+        for entry in entries:
+            x_str = self._format_point_number(entry["x"], precision)
+            y_str = self._format_point_number(entry["y"], precision)
+            weight_str = self._format_weight_value(entry["weight"])
+            marker = "|e" if entry["edge"] else ""
+            points.append(f"{x_str}|{y_str}|{weight_str}{marker}")
+        return points
+
+    def _format_weighted_curve_points(self, curve, x_values, point_count, precision=6, protected=None):
+        if not self.use_weights or int(point_count) < 3:
+            return None
+        domain_values = []
+        for value in list(x_values or []) + list(protected or []):
+            try:
+                value = float(value)
+            except Exception:
+                continue
+            if math.isfinite(value):
+                domain_values.append(value)
+        if len(domain_values) < 2:
+            return None
+        left = min(domain_values)
+        right = max(domain_values)
+        if right <= left:
+            return None
+        anchors = {left, right}
+        for value in protected or []:
+            try:
+                value = float(value)
+            except Exception:
+                continue
+            if math.isfinite(value) and left <= value <= right:
+                anchors.add(value)
+        anchors = sorted(anchors)
+        cleaned_anchors = []
+        min_gap = max((right - left) * 1e-10, 1e-9)
+        for value in anchors:
+            if not cleaned_anchors or value - cleaned_anchors[-1] > min_gap:
+                cleaned_anchors.append(value)
+        if len(cleaned_anchors) < 2:
+            return None
+        tolerance, y_scale = self._weighted_fit_tolerance(curve, domain_values, precision=precision, protected=cleaned_anchors)
+        coarse_segments = self._build_weighted_segments(
+            curve,
+            cleaned_anchors,
+            point_count=point_count,
+            precision=precision,
+            tolerance=tolerance,
+            y_scale=y_scale,
+            refine_weights=False
+        )
+        refined_segments = self._build_weighted_segments(
+            curve,
+            cleaned_anchors,
+            point_count=point_count,
+            precision=precision,
+            tolerance=tolerance,
+            y_scale=y_scale,
+            refine_weights=True
+        )
+        segments = self._choose_weighted_segments([coarse_segments, refined_segments], tolerance)
+        if segments is None:
+            return None
+        return self._format_weighted_segments(segments, precision=precision)
+
     def _collapse_flat_runs_in_output(self, points):
         if len(points) <= 2:
             return points
@@ -3591,6 +4020,15 @@ class CurveGenerator:
                     transition_anchors = self._transition_smoothing_anchors(curve)
                     protected.update(transition_anchors)
                     x_values = sorted(set(float(x) for x in x_values + transition_anchors))
+                    weighted_points = self._format_weighted_curve_points(
+                        curve,
+                        x_values,
+                        point_count=point_count,
+                        precision=precision,
+                        protected=protected
+                    )
+                    if weighted_points:
+                        return self._collapse_flat_runs_in_output(weighted_points)
                     x_values = self._resolve_mode_x_values(
                         curve,
                         x_values,
@@ -3626,6 +4064,15 @@ class CurveGenerator:
                 transition_anchors = self._transition_smoothing_anchors(curve)
                 protected.update(transition_anchors)
                 sampled_x = sorted(set(float(x) for x in sampled_x + transition_anchors))
+                weighted_points = self._format_weighted_curve_points(
+                    curve,
+                    sampled_x,
+                    point_count=point_count,
+                    precision=precision,
+                    protected=protected
+                )
+                if weighted_points:
+                    return self._collapse_flat_runs_in_output(weighted_points)
                 sampled_x = self._resolve_mode_x_values(
                     curve,
                     sampled_x,
@@ -3708,6 +4155,15 @@ class CurveGenerator:
         preserve_below_x = 0.0
         if self.mode_name == "power":
             preserve_below_x = max_input * 0.25
+        weighted_points = self._format_weighted_curve_points(
+            curve,
+            x_values,
+            point_count=point_count,
+            precision=precision,
+            protected=protected
+        )
+        if weighted_points:
+            return self._collapse_flat_runs_in_output(weighted_points)
         x_values = self._resolve_mode_x_values(
             curve,
             x_values,
@@ -4243,6 +4699,8 @@ def main():
             precision = get_output_precision(last)
             smooth_transitions = get_smooth_transition_mode(last)
             smooth_transition_strength = get_smooth_transition_strength(last)
+            use_weights = get_use_weights_mode(last)
+            use_weights_enabled = get_use_weights(last)
             clear()
             print(sep(70))
             print(f" {CYAN}IMPORTING RAWACCEL SETTINGS{RESET}")
@@ -4253,6 +4711,7 @@ def main():
             print(f"{BLUE}Precision:{RESET} {precision}")
             print(f"{BLUE}Point reduction:{RESET} {format_reduction_label(point_reduction_mode)}")
             print(f"{BLUE}Smooth transitions:{RESET} {format_smooth_transition_label(smooth_transitions)}")
+            print(f"{BLUE}Use weights:{RESET} {format_use_weights_label(use_weights)}")
             print(f"\n{YELLOW}Building CustomCurve profile data...{RESET}\n")
             saved_count = 0
             skipped_count = 0
@@ -4292,7 +4751,8 @@ def main():
                         curve_type=curve_type,
                         cap_mode=cap_mode,
                         point_reduction_mode=point_reduction_mode,
-                        smooth_transition_strength=smooth_transition_strength
+                        smooth_transition_strength=smooth_transition_strength,
+                        use_weights=use_weights_enabled
                     )
                     custom_right_slope = generator.estimate_right_slope(args, max_input)
                     profile = generator.create_profile(
@@ -4328,6 +4788,7 @@ def main():
                 "point_reduction_mode": point_reduction_mode,
                 "precision": precision,
                 "smooth_transitions": smooth_transitions,
+                "use_weights": use_weights,
                 "filename": filename,
                 "rawaccel_path": str(last.get("rawaccel_path", ""))
             })
@@ -4345,6 +4806,8 @@ def main():
         precision = get_output_precision(last)
         smooth_transitions = get_smooth_transition_mode(last)
         smooth_transition_strength = get_smooth_transition_strength(last)
+        use_weights = get_use_weights_mode(last)
+        use_weights_enabled = get_use_weights(last)
         max_input = estimate_default_max_input(mode, curve_type, cap_mode, args)
         screen_header("GENERATING CURVE", 70)
         print(f"\n{BLUE}Profile:{RESET} {profile_name}")
@@ -4355,6 +4818,7 @@ def main():
         print(f"{BLUE}Precision:{RESET} {precision}")
         print(f"{BLUE}Point reduction:{RESET} {format_reduction_label(point_reduction_mode)}")
         print(f"{BLUE}Smooth transitions:{RESET} {format_smooth_transition_label(smooth_transitions)}")
+        print(f"{BLUE}Use weights:{RESET} {format_use_weights_label(use_weights)}")
         print(f"{BLUE}Auto max input:{RESET} {max_input:.6f}".rstrip("0").rstrip("."))
         print(f"\n{YELLOW}Building CustomCurve profile data...{RESET}")
         generator = CurveGenerator(
@@ -4362,7 +4826,8 @@ def main():
             curve_type=curve_type,
             cap_mode=cap_mode,
             point_reduction_mode=point_reduction_mode,
-            smooth_transition_strength=smooth_transition_strength
+            smooth_transition_strength=smooth_transition_strength,
+            use_weights=use_weights_enabled
         )
         custom_right_slope = generator.estimate_right_slope(args, max_input)
         profile = generator.create_profile(
@@ -4400,6 +4865,7 @@ def main():
             "point_reduction_mode": point_reduction_mode,
             "precision": precision,
             "smooth_transitions": smooth_transitions,
+            "use_weights": use_weights,
             "filename": filename
         })
         continue
