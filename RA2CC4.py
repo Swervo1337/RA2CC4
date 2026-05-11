@@ -3848,7 +3848,7 @@ class CurveGenerator:
         with open(filename, 'w') as f:
             json.dump(profile, f, indent=2)
         print(f"\n{GREEN}[OK] Profile saved to {filename}{RESET}")
-def estimate_default_max_input(mode, curve_type, cap_mode, args):
+def estimate_heuristic_max_input(mode, curve_type, cap_mode, args):
     def bounded_tail_cover(cap_x, constant_term, reference_level):
         cap_x = max(float(cap_x), 1e-9)
         reference_level = max(float(reference_level), 1e-9)
@@ -3922,6 +3922,105 @@ def estimate_default_max_input(mode, curve_type, cap_mode, args):
             return min(max(power_base, cap_x * 2.5, tail_cover, 200.0), 1000.0)
         return min(max(power_base, 200.0), 1000.0)
     return base
+
+def estimate_default_max_input(mode, curve_type, cap_mode, args):
+    fallback = estimate_heuristic_max_input(mode, curve_type, cap_mode, args)
+    try:
+        generator = CurveGenerator(mode_name=mode, curve_type=curve_type, cap_mode=cap_mode)
+        curve = generator._build_curve(args)
+        anchors = {0.0}
+        if mode in ["classic/linear", "natural"]:
+            anchors.add(float(args.get("input_offset", 0.0)))
+        if mode == "jump":
+            anchors.add(float(args.get("cap_x", 15.0)))
+        if mode == "synchronous":
+            anchors.add(float(args.get("sync_speed", 5.0)))
+        if mode == "motivity (1.6.1)":
+            anchors.add(float(args.get("midpoint", 5.0)))
+        if mode == "power":
+            offset_bp = generator._power_offset_breakpoint(args)
+            if offset_bp is not None:
+                anchors.add(float(offset_bp))
+        cap_breakpoint = generator._special_breakpoint(args)
+        if cap_breakpoint is not None:
+            anchors.add(float(cap_breakpoint))
+        if mode == "lut":
+            points = parse_lookup_points(args.get("lookup_points", []))
+            anchors.update(float(x) for x, _ in points)
+
+        anchors = {
+            float(x)
+            for x in anchors
+            if math.isfinite(float(x)) and float(x) >= 0.0
+        }
+        anchor_max = max(anchors or {0.0})
+        lower_bound = max(30.0, anchor_max * 1.12, fallback * 0.05)
+        hard_max = min(max(fallback * 3.0, lower_bound * 3.0, 300.0), 5000.0)
+        if mode == "lut" and anchor_max > 0:
+            hard_max = min(max(anchor_max * 2.5, 200.0), 5000.0)
+
+        sample_x = {0.0, lower_bound, fallback, hard_max}
+        sample_x.update(anchors)
+        linear_count = 180
+        for i in range(linear_count):
+            t = i / max(1, linear_count - 1)
+            sample_x.add(hard_max * t)
+            sample_x.add(hard_max * (t ** 2.0))
+        log_start = max(1e-4, min(max(0.001, lower_bound / 1000.0), 1.0))
+        log_stop = max(hard_max, log_start * 2.0)
+        log_min = math.log(log_start)
+        log_max = math.log(log_stop)
+        for i in range(linear_count):
+            t = i / max(1, linear_count - 1)
+            sample_x.add(math.exp(log_min + (log_max - log_min) * t))
+
+        samples = []
+        for x in sorted(sample_x):
+            x = min(max(float(x), 0.0), hard_max)
+            if not math.isfinite(x):
+                continue
+            try:
+                y = float(curve(x))
+            except Exception:
+                continue
+            if math.isfinite(y):
+                samples.append((x, y))
+        if len(samples) < 8:
+            return fallback
+
+        y_values = [y for _, y in samples]
+        y_min = min(y_values)
+        y_max = max(y_values)
+        y_scale = max(y_max - y_min, max(abs(y) for y in y_values), 1.0)
+        tail_tolerance = max(y_scale * 0.012, 0.01)
+
+        best = None
+        for i, (x, y) in enumerate(samples):
+            if x < lower_bound:
+                continue
+            future = [fy for _, fy in samples[i:]]
+            if len(future) < 8:
+                break
+            future_range = max(future) - min(future)
+            if future_range <= tail_tolerance:
+                best = x
+                break
+
+        if best is None:
+            effective = generator._adaptive_effective_max_input(curve, fallback, precision=6)
+            if effective < fallback:
+                best = effective
+            else:
+                best = fallback
+
+        padded = best * 1.08 if best > 0 else fallback
+        min_reasonable = max(30.0, anchor_max * 1.04)
+        max_reasonable = max(fallback * 1.5, min_reasonable)
+        if best < fallback:
+            return max(min_reasonable, padded)
+        return min(max(padded, min_reasonable), max_reasonable)
+    except Exception:
+        return fallback
 def format_setup_value(value):
     if isinstance(value, list):
         return str(len(value))
