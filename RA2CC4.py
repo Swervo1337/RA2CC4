@@ -29,6 +29,12 @@ RAWACCEL_POSITIVE_EPSILON = 1e-12
 RAWACCEL_MOTIVITY_MIN = 1.0 + RAWACCEL_POSITIVE_EPSILON
 RAWACCEL_CLASSIC_EXPONENT_MIN = 1.0 + RAWACCEL_POSITIVE_EPSILON
 RAWACCEL_LUT_POINTS_CAPACITY = 257
+AUTO_MAX_INPUT_SEARCH_MULTIPLIER = 4.0
+AUTO_MAX_INPUT_SEARCH_MIN = 200.0
+PRACTICAL_TAIL_COVERAGE_RATIO = 0.92
+PRACTICAL_TAIL_SPAN_RATIO = 0.05
+PRACTICAL_TAIL_SLOPE_RATIO = 0.35
+PRACTICAL_TAIL_FUTURE_CHANGE_RATIO = 0.03
 def safe_exp(value):
     value = float(value)
     if value >= MAX_EXPONENT:
@@ -234,6 +240,10 @@ SMOOTH_TRANSITION_OPTIONS = ["off", "on"]
 SMOOTH_TRANSITION_STRENGTHS = {
     "off": 0.0,
     "on": 1.0,
+}
+CURVE_TYPES = ["legacy", "gain", "customgain"]
+CUSTOM_GAIN_ARG_DEFAULTS = {
+    "custom_gain_speed": 1.0,
 }
 RECOMMENDED_POINTS = 128
 RECOMMENDED_PRECISION = 6
@@ -1294,9 +1304,35 @@ ARG_LIMITS = {
     "exponent": (RAWACCEL_CLASSIC_EXPONENT_MIN, None),
     "cap_x": (0.0, None),
     "cap_y": (0.0, None),
+    "custom_gain_speed": (RAWACCEL_POSITIVE_EPSILON, None),
 }
 def get_arg_limits(key):
     return ARG_LIMITS.get(key, (0.0, None))
+def normalize_curve_type(value, fallback="gain"):
+    curve_type = str(value or fallback).strip().lower()
+    return curve_type if curve_type in CURVE_TYPES else fallback
+def curve_type_uses_gain_math(curve_type):
+    return normalize_curve_type(curve_type) in ["gain", "customgain"]
+def format_curve_type_label(curve_type):
+    curve_type = normalize_curve_type(curve_type)
+    if curve_type == "customgain":
+        return "CustomGain"
+    return curve_type.title()
+def sanitize_custom_gain_settings(settings):
+    cleaned = dict(CUSTOM_GAIN_ARG_DEFAULTS)
+    if not isinstance(settings, dict):
+        return cleaned
+    for key in CUSTOM_GAIN_ARG_DEFAULTS:
+        minimum, maximum = get_arg_limits(key)
+        cleaned[key] = safe_float(settings.get(key, cleaned[key]), cleaned[key], minimum, maximum)
+    return cleaned
+def ensure_custom_gain_arg_defaults(args):
+    settings = sanitize_custom_gain_settings(args)
+    for key in list(args.keys()):
+        if str(key).startswith("custom_gain_") and key not in CUSTOM_GAIN_ARG_DEFAULTS:
+            args.pop(key, None)
+    args.update(settings)
+    return args
 def parse_bool(value, fallback=False):
     if isinstance(value, bool):
         return value
@@ -1355,9 +1391,7 @@ def normalize_config_values(data):
             if mapped_mode in ["natural", "classic/linear", "jump", "synchronous", "motivity (1.6.1)", "power", "lut"]:
                 cleaned["mode"] = mapped_mode
     if "curve_type" in data:
-        curve_type = str(data.get("curve_type", "gain")).strip().lower()
-        if curve_type in ["legacy", "gain"]:
-            cleaned["curve_type"] = curve_type
+        cleaned["curve_type"] = normalize_curve_type(data.get("curve_type", "gain"))
     if "cap_mode" in data:
         cap_mode = str(data.get("cap_mode", "out")).strip().lower()
         if cap_mode in ["out", "in", "io"]:
@@ -1690,6 +1724,13 @@ class JumpCurveBase:
             return 0.0
         return self.step_y * (x + math.log(1.0 + self.decay(x)) / self.smooth_rate)
 class JumpCurveLegacy(JumpCurveBase):
+    def flat_segments(self):
+        if self.is_smooth() or self.step_x <= 0.0:
+            return []
+        return [
+            (0.0, self.step_x, 1.0),
+            (self.step_x, float("inf"), 1.0 + self.step_y)
+        ]
     def __call__(self, x):
         if self.is_smooth():
             return self.smooth_value(x) + 1.0
@@ -1726,6 +1767,7 @@ class ClassicCurveLegacy(ClassicCurveBase):
     def __init__(self, input_offset, acceleration, exponent, cap_mode, cap_x, cap_y):
         super().__init__(input_offset, acceleration, exponent)
         self.cap = float("inf")
+        self.tail_start = None
         self.sign = 1.0
         self.accel_raised = safe_pow(self.acceleration, self.exponent - 1)
         cap_mode = cap_mode.lower()
@@ -1737,15 +1779,44 @@ class ClassicCurveLegacy(ClassicCurveBase):
             if cap_x > self.offset and self.cap > 0:
                 a = self.base_accel(cap_x, self.cap)
                 self.accel_raised = safe_pow(a, self.exponent - 1)
+                self.tail_start = cap_x
         elif cap_mode == "in":
             if cap_x > 0:
                 self.cap = self.base_fn(cap_x, self.accel_raised)
+                self.tail_start = cap_x
         else:
             if cap_y > 0:
                 self.cap = cap_y - 1.0
                 if self.cap < 0:
                     self.cap = -self.cap
                     self.sign = -self.sign
+                self.tail_start = self._find_cap_start()
+    def _find_cap_start(self):
+        if not math.isfinite(self.cap) or self.cap <= 0.0:
+            return None
+        low = max(self.offset, 0.0)
+        high = max(low * 2.0, 1.0)
+        for _ in range(80):
+            if self.base_fn(high, self.accel_raised) >= self.cap:
+                break
+            low = high
+            high *= 2.0
+            if high > 1e6:
+                return None
+        else:
+            return None
+        for _ in range(64):
+            mid = (low + high) * 0.5
+            if self.base_fn(mid, self.accel_raised) >= self.cap:
+                high = mid
+            else:
+                low = mid
+        return high
+    def flat_segments(self):
+        segments = super().flat_segments()
+        if self.tail_start is not None and math.isfinite(self.tail_start) and self.tail_start > 0.0:
+            segments.append((self.tail_start, float("inf"), self.sign * self.cap + 1.0))
+        return segments
     def __call__(self, x):
         if x <= self.offset:
             return 1.0
@@ -2049,6 +2120,46 @@ class LookupCurve:
                 return (y / x) if self.velocity else y
         y = self.points[0][1]
         return (y / max(self.points[0][0], 1e-12)) if self.velocity else y
+class CustomGainCurve:
+    def __init__(self, base_curve, args):
+        self.base_curve = base_curve
+        settings = sanitize_custom_gain_settings(args)
+        self.pull = max(settings["custom_gain_speed"], RAWACCEL_POSITIVE_EPSILON)
+    def flat_segments(self):
+        if hasattr(self.base_curve, "flat_segments"):
+            out = []
+            for start_x, end_x, y in self.base_curve.flat_segments():
+                out.append((start_x, end_x, y))
+            return out
+        return []
+    def _cap_info(self):
+        if hasattr(self.base_curve, "cap_y") and math.isfinite(float(self.base_curve.cap_y)):
+            cap = abs(float(self.base_curve.cap_y))
+            sign = float(getattr(self.base_curve, "sign", 1.0))
+            return 1.0, sign, cap
+        if hasattr(self.base_curve, "cap_y_eff") and math.isfinite(float(self.base_curve.cap_y_eff)):
+            cap = abs(float(self.base_curve.cap_y_eff))
+            return 0.0, 1.0, cap
+        return None
+    def _pull_component(self, component, cap):
+        if cap <= 0.0:
+            return component
+        f = max(0.0, min(1.0, safe_divide(component, cap)))
+        if self.pull >= 1.0:
+            pulled = cap * (1.0 - safe_pow(1.0 - f, self.pull, fallback=0.0))
+            if f < 1.0:
+                pulled = min(pulled, cap * (1.0 - 1e-12))
+            return pulled
+        return cap * safe_pow(f, safe_divide(1.0, self.pull), fallback=0.0)
+    def __call__(self, x):
+        y = self.base_curve(x)
+        cap_info = self._cap_info()
+        if cap_info is None or abs(self.pull - 1.0) <= 1e-12:
+            return y
+        neutral, sign, cap = cap_info
+        component = sign * (y - neutral)
+        pulled = self._pull_component(component, cap)
+        return neutral + sign * pulled
 class PowerCurveBase:
     def __init__(self, output_offset, scale, exponent_power, cap_mode, cap_x, cap_y, gain_curve):
         self.power = max(float(exponent_power), RAWACCEL_POSITIVE_EPSILON)
@@ -2113,14 +2224,45 @@ class PowerCurveLegacy(PowerCurveBase):
     def __init__(self, output_offset, scale, exponent_power, cap_mode, cap_x, cap_y):
         super().__init__(output_offset, scale, exponent_power, cap_mode, cap_x, cap_y, gain_curve=False)
         self.cap = float("inf")
+        self.tail_start = None
         if self.cap_mode == "io":
             self.cap = self.cap_y
+            if self.cap_x > 0:
+                self.tail_start = self.cap_x
         elif self.cap_mode == "in":
             if self.cap_x > 0:
                 self.cap = self.base_fn(self.cap_x)
+                self.tail_start = self.cap_x
         else:
             if self.cap_y > 0:
                 self.cap = self.cap_y
+                self.tail_start = self._find_cap_start()
+    def _find_cap_start(self):
+        if not math.isfinite(self.cap) or self.cap <= 0.0:
+            return None
+        low = max(self.offset_x, 0.0)
+        high = max(low * 2.0, 1.0)
+        for _ in range(80):
+            if self.base_fn(high) >= self.cap:
+                break
+            low = high
+            high *= 2.0
+            if high > 1e6:
+                return None
+        else:
+            return None
+        for _ in range(64):
+            mid = (low + high) * 0.5
+            if self.base_fn(mid) >= self.cap:
+                high = mid
+            else:
+                low = mid
+        return high
+    def flat_segments(self):
+        segments = super().flat_segments()
+        if self.tail_start is not None and math.isfinite(self.tail_start) and self.tail_start > 0.0:
+            segments.append((self.tail_start, float("inf"), self.cap))
+        return segments
     def __call__(self, x):
         return min(self.base_fn(x), self.cap)
 class PowerCurveGain(PowerCurveBase):
@@ -2272,50 +2414,69 @@ class CurveGenerator:
         self.cap_mode = cap_mode.lower()
         self.point_reduction_mode = (point_reduction_mode or "off").lower()
         self.smooth_transition_strength = max(0.0, finite_value(smooth_transition_strength, 0.0))
-        if self.curve_type not in ["legacy", "gain"]:
-            raise ValueError("curve_type must be 'legacy' or 'gain'")
+        if self.curve_type not in CURVE_TYPES:
+            raise ValueError("curve_type must be 'legacy', 'gain', or 'customgain'")
+    def _uses_gain_math(self):
+        return curve_type_uses_gain_math(self.curve_type)
+    def _customize_gain_curve(self, curve, args):
+        if self.curve_type == "customgain":
+            return CustomGainCurve(curve, args)
+        return curve
+    def _custom_gain_pull(self, args):
+        settings = sanitize_custom_gain_settings(args)
+        return max(settings["custom_gain_speed"], RAWACCEL_POSITIVE_EPSILON)
+    def _custom_gain_classic_exponent(self, args):
+        return max(float(args["exponent"]), RAWACCEL_CLASSIC_EXPONENT_MIN)
+    def _custom_gain_power_exponent(self, args):
+        return max(float(args["exponent_power"]), RAWACCEL_POSITIVE_EPSILON)
     def _build_curve(self, args):
         if self.mode_name == "natural":
-            return NaturalCurveLegacy(args["input_offset"], args["decay_rate"], args["limit"]) \
-                if self.curve_type == "legacy" \
-                else NaturalCurveGain(args["input_offset"], args["decay_rate"], args["limit"])
+            legacy = NaturalCurveLegacy(args["input_offset"], args["decay_rate"], args["limit"])
+            return legacy if not self._uses_gain_math() else self._customize_gain_curve(
+                NaturalCurveGain(args["input_offset"], args["decay_rate"], args["limit"]), args
+            )
         if self.mode_name == "jump":
-            return JumpCurveLegacy(args["cap_x"], args["cap_y"], args["smooth"]) \
-                if self.curve_type == "legacy" \
-                else JumpCurveGain(args["cap_x"], args["cap_y"], args["smooth"])
+            legacy = JumpCurveLegacy(args["cap_x"], args["cap_y"], args["smooth"])
+            return legacy if not self._uses_gain_math() else self._customize_gain_curve(
+                JumpCurveGain(args["cap_x"], args["cap_y"], args["smooth"]), args
+            )
         if self.mode_name == "synchronous":
-            return SynchronousCurveLegacy(args["gamma"], args["motivity"], args["sync_speed"], args["smooth"]) \
-                if self.curve_type == "legacy" \
-                else SynchronousCurveGain(args["gamma"], args["motivity"], args["sync_speed"], args["smooth"])
+            legacy = SynchronousCurveLegacy(args["gamma"], args["motivity"], args["sync_speed"], args["smooth"])
+            return legacy if not self._uses_gain_math() else self._customize_gain_curve(
+                SynchronousCurveGain(args["gamma"], args["motivity"], args["sync_speed"], args["smooth"]), args
+            )
         if self.mode_name == "motivity (1.6.1)":
-            return MotivityCurveLegacy(args["growth_rate"], args["motivity"], args["midpoint"]) \
-                if self.curve_type == "legacy" \
-                else MotivityCurveGain(args["growth_rate"], args["motivity"], args["midpoint"])
+            legacy = MotivityCurveLegacy(args["growth_rate"], args["motivity"], args["midpoint"])
+            return legacy if not self._uses_gain_math() else self._customize_gain_curve(
+                MotivityCurveGain(args["growth_rate"], args["motivity"], args["midpoint"]), args
+            )
         if self.mode_name == "lut":
             return LookupCurve(args.get("lookup_points", []), velocity=bool(args.get("lut_velocity", True)))
         if self.mode_name == "classic/linear":
-            return ClassicCurveLegacy(
-                args["input_offset"], args["acceleration"], args["exponent"],
-                self.cap_mode, args["cap_x"], args["cap_y"]
-            ) if self.curve_type == "legacy" else ClassicCurveGain(
+            legacy = ClassicCurveLegacy(
                 args["input_offset"], args["acceleration"], args["exponent"],
                 self.cap_mode, args["cap_x"], args["cap_y"]
             )
+            return legacy if not self._uses_gain_math() else self._customize_gain_curve(ClassicCurveGain(
+                args["input_offset"], args["acceleration"], self._custom_gain_classic_exponent(args),
+                self.cap_mode, args["cap_x"], args["cap_y"]
+            ), args)
         if self.mode_name == "power":
-            return PowerCurveLegacy(
-                args["output_offset"], args["scale"], args["exponent_power"],
-                self.cap_mode, args["cap_x"], args["cap_y"]
-            ) if self.curve_type == "legacy" else PowerCurveGain(
+            legacy = PowerCurveLegacy(
                 args["output_offset"], args["scale"], args["exponent_power"],
                 self.cap_mode, args["cap_x"], args["cap_y"]
             )
+            return legacy if not self._uses_gain_math() else self._customize_gain_curve(PowerCurveGain(
+                args["output_offset"], args["scale"], self._custom_gain_power_exponent(args),
+                self.cap_mode, args["cap_x"], args["cap_y"]
+            ), args)
         raise ValueError(f"Unsupported mode: {self.mode_name}")
     def _classic_gain_cap_breakpoint(self, args):
-        if self.mode_name != "classic/linear" or self.curve_type != "gain":
+        if self.mode_name != "classic/linear" or not self._uses_gain_math():
             return None
         offset = args["input_offset"]
         accel = args["acceleration"]
-        exponent = max(float(args["exponent"]), 1e-12)
+        exponent = max(float(self._custom_gain_classic_exponent(args)), 1e-12)
         cap_x = args.get("cap_x", 0.0)
         cap_y = args.get("cap_y", 0.0)
         if self.cap_mode in ["in", "io"]:
@@ -2328,11 +2489,11 @@ class CurveGenerator:
             return (accel * offset + safe_pow(cap_y_abs / exponent, 1 / (exponent - 1))) / accel
         return None
     def _power_gain_cap_breakpoint(self, args):
-        if self.mode_name != "power" or self.curve_type != "gain":
+        if self.mode_name != "power" or not self._uses_gain_math():
             return None
         cap_x = args.get("cap_x", 0.0)
         cap_y = args.get("cap_y", 0.0)
-        p = max(float(args.get("exponent_power", 0.05)), 1e-12)
+        p = max(float(self._custom_gain_power_exponent(args)), 1e-12)
         s = max(float(args.get("scale", 1.0)), 1e-12)
         if self.cap_mode in ["in", "io"]:
             return cap_x if cap_x > 0 else None
@@ -2349,7 +2510,7 @@ class CurveGenerator:
         s = float(args.get("scale", 1.0))
         if self.cap_mode == "io" and self.curve_type == "legacy":
             return 0.0
-        if self.cap_mode == "io" and self.curve_type == "gain":
+        if self.cap_mode == "io" and self._uses_gain_math():
             if cap_x > 0:
                 s = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, p)
         if output_offset <= 0:
@@ -3130,6 +3291,8 @@ class CurveGenerator:
         for i in range(1, len(xs)):
             if abs(ys[i] - ys[i - 1]) > epsilon:
                 last_change = i
+        if last_change == 0:
+            return max_input
         if last_change >= len(xs) - 3:
             return max_input
         end_index = min(len(xs) - 1, last_change + 2)
@@ -3756,14 +3919,54 @@ class CurveGenerator:
         curve = self._build_curve(args)
         x = max(float(max_input), 0.0)
         curve = self._apply_transition_smoothing(curve, args, x, precision=6)
+        for start_x, end_x, _ in self._exact_flat_segments(curve, x):
+            if end_x >= x - max(1e-9, x * 1e-9) and start_x < x:
+                return 0.0
+        if self.mode_name in ["classic/linear", "power"] and self._uses_gain_math():
+            slope = self._estimate_average_right_slope(curve, x)
+            if abs(slope) < 1e-9:
+                return 0.0
+            return slope
+        slope = self._estimate_local_right_slope(curve, x)
+        if abs(slope) < 1e-9:
+            return 0.0
+        return slope
+
+    def _estimate_local_right_slope(self, curve, x):
         h = max(1e-6, x * 1e-4)
         x0 = max(0.0, x - h)
         if abs(x - x0) <= 1e-12:
             return 0.0
-        slope = (curve(x) - curve(x0)) / (x - x0)
-        if abs(slope) < 1e-9:
+        return (curve(x) - curve(x0)) / (x - x0)
+
+    def _estimate_average_right_slope(self, curve, x):
+        if x <= 0.0:
             return 0.0
-        return slope
+        end_y = float(curve(x))
+        samples = []
+        for ratio in [1.08, 1.18, 1.35, 1.65, 2.10, 3.00]:
+            x1 = x * ratio
+            if x1 <= x:
+                continue
+            dx = x1 - x
+            if dx <= 1e-12:
+                continue
+            slope = (float(curve(x1)) - end_y) / dx
+            if math.isfinite(slope):
+                samples.append((slope, dx))
+        local = self._estimate_local_right_slope(curve, x)
+        if math.isfinite(local):
+            samples.append((local, max(x * 0.02, 1e-6)))
+        if not samples:
+            return 0.0
+        direction = 1.0 if float(curve(x * 1.1)) >= end_y else -1.0
+        same_direction = [item for item in samples if item[0] * direction >= 0.0]
+        if same_direction:
+            samples = same_direction
+        total_weight = sum(1.0 / math.sqrt(max(weight, 1e-12)) for _, weight in samples)
+        if total_weight <= 0.0:
+            return 0.0
+        return sum(slope / math.sqrt(max(weight, 1e-12)) for slope, weight in samples) / total_weight
     def sample_values(self, args, max_input, precision=6):
         curve = self._build_curve(args)
         max_input = max(float(max_input), 0.0)
@@ -3776,6 +3979,37 @@ class CurveGenerator:
             y_str = f"{y:.{precision}f}".rstrip("0").rstrip(".")
             out.append((x_str, y_str))
         return out
+    @staticmethod
+    def _parse_profile_point(point):
+        parts = str(point).split("|")
+        if len(parts) < 3:
+            return None
+        try:
+            return float(parts[0]), float(parts[1]), parts
+        except Exception:
+            return None
+    @staticmethod
+    def _without_edge_marker(point):
+        parts = str(point).split("|")
+        if parts and parts[-1] == "e":
+            parts = parts[:-1]
+        return "|".join(parts)
+    def _trim_leading_flat_zero_point(self, points, precision=6):
+        if len(points) <= 2:
+            return points, False
+        first = self._parse_profile_point(points[0])
+        second = self._parse_profile_point(points[1])
+        if first is None or second is None:
+            return points, False
+        first_x, first_y, _ = first
+        second_x, second_y, _ = second
+        if abs(first_x) > 1e-12 or second_x <= first_x:
+            return points, False
+        tolerance = max(10.0 ** -(int(precision) + 1), 1e-12)
+        if abs(first_y - second_y) > tolerance:
+            return points, False
+        trimmed = [self._without_edge_marker(points[1])] + list(points[2:])
+        return trimmed, True
     def create_profile(
         self,
         profile_name,
@@ -3793,8 +4027,9 @@ class CurveGenerator:
             precision=precision
         )
         profile_id = str(uuid.uuid4())
-        allow_non_zero_left = self.mode_name in ["power", "lut"]
-        left_slope_mode = "Flat" if self.mode_name in ["power", "lut"] else "Linear"
+        points, trimmed_leading_flat = self._trim_leading_flat_zero_point(points, precision=precision)
+        allow_non_zero_left = trimmed_leading_flat or self.mode_name in ["power", "lut"]
+        left_slope_mode = "Flat" if allow_non_zero_left else "Linear"
         base_profile = {
             "Id": profile_id,
             "Name": profile_name,
@@ -3855,8 +4090,8 @@ def estimate_heuristic_max_input(mode, curve_type, cap_mode, args):
         constant_term = abs(float(constant_term))
         rel_eps = 0.01
         x_rel = constant_term / (reference_level * rel_eps)
-        lower = cap_x * 2.0
-        upper = min(cap_x * 6.0, 600.0)
+        lower = min(cap_x * 2.0, 600.0)
+        upper = max(lower, min(cap_x * 6.0, 600.0))
         return max(lower, min(max(x_rel, lower), upper))
     offset = args.get("input_offset", 0.0)
     base = max(30.0, offset * 20.0)
@@ -3886,7 +4121,7 @@ def estimate_heuristic_max_input(mode, curve_type, cap_mode, args):
             cap_x = 15.0
         if cap_mode in ["in", "io"] and cap_x > 0:
             return max(base, cap_x * 2.0, 200.0)
-        if cap_mode == "out" and curve_type == "gain":
+        if cap_mode == "out" and curve_type_uses_gain_math(curve_type):
             accel = args.get("acceleration", 0.0)
             exponent = max(float(args.get("exponent", 2.0)), 1e-12)
             cap_y = args.get("cap_y", 0.0) - 1.0
@@ -3897,7 +4132,7 @@ def estimate_heuristic_max_input(mode, curve_type, cap_mode, args):
                 base_at_cap = accel_raised * safe_pow(max(cap_x - offset, 1e-12), exponent) / max(cap_x, 1e-12)
                 constant = (base_at_cap - cap_y_abs) * cap_x
                 tail_cover = bounded_tail_cover(cap_x, constant, cap_y_abs)
-                return max(base, cap_x * 2.0, tail_cover, 200.0)
+                return max(base, min(cap_x * 2.0, 600.0), tail_cover, 200.0)
         return max(base, 200.0)
     if mode == "power":
         output_offset = max(float(args.get("output_offset", 0.0)), 0.0)
@@ -3908,13 +4143,13 @@ def estimate_heuristic_max_input(mode, curve_type, cap_mode, args):
         if cap_mode == "io":
             if curve_type == "legacy":
                 output_offset = 0.0
-            elif curve_type == "gain" and cap_x > 0:
+            elif curve_type_uses_gain_math(curve_type) and cap_x > 0:
                 scale = PowerCurveBase.scale_from_gain_point(cap_x, cap_y, exponent_power)
         offset_x = safe_divide(safe_pow(output_offset / (exponent_power + 1.0), 1.0 / exponent_power), scale) if output_offset > 0 else 0.0
         power_base = max(120.0, offset_x * 2.5)
         if cap_mode in ["in", "io"] and cap_x > 0:
             return min(max(power_base, cap_x * 2.5, 200.0), 1000.0)
-        if cap_mode == "out" and curve_type == "gain" and cap_y > 0:
+        if cap_mode == "out" and curve_type_uses_gain_math(curve_type) and cap_y > 0:
             cap_x = safe_divide(safe_pow(cap_y / (exponent_power + 1.0), 1.0 / exponent_power), scale)
             base_at_cap = safe_pow(scale * cap_x, exponent_power)
             constant_b = (base_at_cap - cap_y) * cap_x
@@ -3923,102 +4158,299 @@ def estimate_heuristic_max_input(mode, curve_type, cap_mode, args):
         return min(max(power_base, 200.0), 1000.0)
     return base
 
+def auto_max_input_search_ceiling(fallback, anchor_max):
+    fallback = finite_value(fallback, AUTO_MAX_INPUT_SEARCH_MIN)
+    anchor_max = finite_value(anchor_max, 0.0)
+    fallback = max(fallback, AUTO_MAX_INPUT_SEARCH_MIN)
+    anchor_max = max(anchor_max, 0.0)
+    return max(
+        fallback * AUTO_MAX_INPUT_SEARCH_MULTIPLIER,
+        anchor_max * 1.10,
+        AUTO_MAX_INPUT_SEARCH_MIN
+    )
+
+def collect_curve_coverage_anchors(mode, generator, args):
+    anchors = {0.0}
+    if mode in ["classic/linear", "natural"]:
+        anchors.add(float(args.get("input_offset", 0.0)))
+    if mode == "jump":
+        anchors.add(float(args.get("cap_x", 15.0)))
+    if mode == "synchronous":
+        anchors.add(float(args.get("sync_speed", 5.0)))
+    if mode == "motivity (1.6.1)":
+        anchors.add(float(args.get("midpoint", 5.0)))
+    if mode == "power":
+        offset_bp = generator._power_offset_breakpoint(args)
+        if offset_bp is not None:
+            anchors.add(float(offset_bp))
+    cap_breakpoint = generator._special_breakpoint(args)
+    if cap_breakpoint is not None:
+        anchors.add(float(cap_breakpoint))
+    if mode == "lut":
+        points = parse_lookup_points(args.get("lookup_points", []))
+        anchors.update(float(x) for x, _ in points)
+    return {
+        float(x)
+        for x in anchors
+        if math.isfinite(float(x)) and float(x) >= 0.0
+    }
+def required_curve_coverage_max_input(mode, cap_mode, args):
+    anchors = {0.0}
+    cap_mode = str(cap_mode or "out").strip().lower()
+    if mode in ["classic/linear", "natural"]:
+        anchors.add(float(args.get("input_offset", 0.0)))
+    if mode == "jump":
+        anchors.add(float(args.get("cap_x", 15.0)))
+    if mode == "synchronous":
+        anchors.add(float(args.get("sync_speed", 5.0)))
+    if mode == "motivity (1.6.1)":
+        anchors.add(float(args.get("midpoint", 5.0)))
+    if mode == "power":
+        output_offset = float(args.get("output_offset", 0.0))
+        exponent_power = max(float(args.get("exponent_power", 0.05)), 1e-12)
+        scale = max(float(args.get("scale", 1.0)), 1e-12)
+        if output_offset > 0.0:
+            anchors.add(safe_divide(safe_pow(output_offset / (exponent_power + 1.0), 1.0 / exponent_power), scale))
+    if mode in ["classic/linear", "power"] and cap_mode in ["in", "io"]:
+        anchors.add(float(args.get("cap_x", 0.0)))
+    if mode == "lut":
+        points = parse_lookup_points(args.get("lookup_points", []))
+        anchors.update(float(x) for x, _ in points)
+    return max(
+        (
+            float(x)
+            for x in anchors
+            if math.isfinite(float(x)) and float(x) >= 0.0
+        ),
+        default=0.0
+    )
+def sample_curve_output_for_coverage(curve, max_input, anchors, sample_count=192):
+    max_input = max(float(max_input), 0.0)
+    sample_x = {0.0, max_input}
+    sample_x.update(
+        min(max(float(x), 0.0), max_input)
+        for x in anchors
+        if math.isfinite(float(x))
+    )
+    if max_input > 0.0:
+        for i in range(sample_count):
+            t = i / max(1, sample_count - 1)
+            sample_x.add(max_input * t)
+            sample_x.add(max_input * (t ** 2.0))
+        positive = [
+            x for x in sample_x
+            if x > 0.0 and math.isfinite(float(x))
+        ]
+        log_start = min(positive) if positive else max_input / max(sample_count, 1)
+        log_start = max(log_start, max_input / safe_pow(2.0, 18.0))
+        log_min = math.log(log_start)
+        log_max = math.log(max(max_input, log_start))
+        for i in range(sample_count):
+            t = i / max(1, sample_count - 1)
+            sample_x.add(math.exp(log_min + (log_max - log_min) * t))
+    samples = []
+    for x in sorted(sample_x):
+        x = min(max(float(x), 0.0), max_input)
+        if not math.isfinite(x):
+            continue
+        try:
+            y = float(curve(x))
+        except Exception:
+            continue
+        if math.isfinite(y):
+            samples.append((x, y))
+    return samples
+def output_coverage_is_stable(samples, max_input):
+    if len(samples) < 8 or max_input <= 0.0:
+        return False
+    y_values = [y for _, y in samples]
+    y_min = min(y_values)
+    y_max = max(y_values)
+    y_span = y_max - y_min
+    y_scale = max(y_span, max(abs(y) for y in y_values), 1.0)
+    y_tolerance = max(y_span * 0.006, y_scale * 1e-5, 1e-8)
+    if y_span <= y_tolerance:
+        return True
+    tail_start = max_input * 0.78
+    tail_values = [y for x, y in samples if x >= tail_start]
+    tail_samples = [(x, y) for x, y in samples if x >= tail_start]
+    if len(tail_values) < 6 or len(tail_samples) < 6:
+        return False
+    tail_span = max(tail_values) - min(tail_values)
+    if tail_span <= y_tolerance:
+        return True
+    tail_dx = tail_samples[-1][0] - tail_samples[0][0]
+    if tail_dx <= 0.0:
+        return False
+    tail_slope = abs(tail_samples[-1][1] - tail_samples[0][1]) / tail_dx
+    average_slope = y_span / max(max_input, 1e-12)
+    if average_slope <= 0.0:
+        return True
+    minor_tail_change = tail_span <= max(y_span * 0.05, y_tolerance)
+    slow_tail = tail_slope <= average_slope * 0.22
+    tail_start_y = tail_samples[0][1]
+    tail_end_y = tail_samples[-1][1]
+    if tail_end_y >= y_values[0]:
+        covered_output = (tail_start_y - y_min) / max(y_span, 1e-12)
+    else:
+        covered_output = (y_max - tail_start_y) / max(y_span, 1e-12)
+    gateway_covered = covered_output >= 0.95
+    if not (minor_tail_change and slow_tail and gateway_covered):
+        return False
+    first_x, first_y = tail_samples[0]
+    last_x, last_y = tail_samples[-1]
+    line_dx = last_x - first_x
+    if line_dx <= 0.0:
+        return False
+    max_deviation = 0.0
+    for x, y in tail_samples[1:-1]:
+        t = (x - first_x) / line_dx
+        expected = first_y + (last_y - first_y) * t
+        max_deviation = max(max_deviation, abs(y - expected))
+    return max_deviation <= max(tail_span * 0.20, y_tolerance)
+def output_coverage_can_handoff_to_slope(curve, samples, max_input, anchors):
+    if not output_coverage_is_stable(samples, max_input):
+        return False
+    future_samples = sample_curve_output_for_coverage(curve, max_input * 2.0, anchors)
+    if len(future_samples) < 8:
+        return True
+    y_values = [y for _, y in samples]
+    y_span = max(y_values) - min(y_values)
+    y_scale = max(y_span, max(abs(y) for y in y_values), 1.0)
+    tolerance = max(y_span * 0.025, y_scale * 1e-5, 1e-8)
+    return abs(future_samples[-1][1] - samples[-1][1]) <= tolerance
+def practical_tail_predicate(curve, samples, index, max_input, y_min, y_max, y_scale):
+    if index < 0 or index >= len(samples) - 6:
+        return False
+    x, y = samples[index]
+    if x <= 0.0 or x >= max_input:
+        return False
+    tail_samples = samples[index:]
+    tail_dx = tail_samples[-1][0] - tail_samples[0][0]
+    if tail_dx <= 0.0:
+        return False
+    y_span = y_max - y_min
+    y_tolerance = max(y_span * 0.006, y_scale * 1e-5, 1e-8)
+    if y_span <= y_tolerance:
+        return True
+    tail_values = [tail_y for _, tail_y in tail_samples]
+    tail_span = max(tail_values) - min(tail_values)
+    minor_tail_change = tail_span <= max(y_span * PRACTICAL_TAIL_SPAN_RATIO, y_tolerance)
+    tail_slope = abs(tail_samples[-1][1] - tail_samples[0][1]) / tail_dx
+    average_slope = y_span / max(max_input, 1e-12)
+    slow_tail = average_slope <= 0.0 or tail_slope <= average_slope * PRACTICAL_TAIL_SLOPE_RATIO
+    if samples[-1][1] >= samples[0][1]:
+        covered_output = (y - y_min) / max(y_span, 1e-12)
+    else:
+        covered_output = (y_max - y) / max(y_span, 1e-12)
+    gateway_covered = covered_output >= PRACTICAL_TAIL_COVERAGE_RATIO
+    try:
+        future_y = float(curve(x * 2.0))
+    except Exception:
+        future_y = tail_samples[-1][1]
+    future_stable = abs(future_y - y) <= max(y_span * PRACTICAL_TAIL_FUTURE_CHANGE_RATIO, y_tolerance)
+    return minor_tail_change and slow_tail and gateway_covered and future_stable
+def find_practical_flat_tail_start(curve, anchors, max_input, anchor_max, precision=6):
+    max_input = max(float(max_input), 0.0)
+    anchor_max = max(float(anchor_max), 0.0)
+    if max_input <= 0.0:
+        return None
+    samples = sample_curve_output_for_coverage(curve, max_input, anchors, sample_count=256)
+    if len(samples) < 12:
+        return None
+    y_values = [y for _, y in samples]
+    y_min = min(y_values)
+    y_max = max(y_values)
+    y_span = y_max - y_min
+    y_scale = max(y_span, max(abs(y) for y in y_values), 1.0)
+    y_tolerance = max(y_span * 0.006, y_scale * 1e-5, 10.0 ** -(int(precision) + 1))
+    if y_span <= y_tolerance:
+        return max(anchor_max, 0.0) if anchor_max > 0.0 else None
+    first_index = None
+    for i, (x, _) in enumerate(samples):
+        if x < anchor_max:
+            continue
+        if practical_tail_predicate(curve, samples, i, max_input, y_min, y_max, y_scale):
+            first_index = i
+            break
+    if first_index is None:
+        return None
+    low = max(anchor_max, samples[max(0, first_index - 1)][0])
+    high = samples[first_index][0]
+    if high <= low:
+        return high
+    for _ in range(20):
+        mid = (low + high) * 0.5
+        refined_samples = sample_curve_output_for_coverage(curve, max_input, set(anchors) | {mid}, sample_count=256)
+        mid_index = None
+        for i, (x, _) in enumerate(refined_samples):
+            if x >= mid:
+                mid_index = i
+                break
+        if mid_index is not None and practical_tail_predicate(curve, refined_samples, mid_index, max_input, y_min, y_max, y_scale):
+            high = mid
+        else:
+            low = mid
+    return high
+def refine_output_coverage_end(curve, anchors, low, high):
+    low = max(float(low), 0.0)
+    high = max(float(high), low)
+    for _ in range(18):
+        mid = (low + high) * 0.5
+        samples = sample_curve_output_for_coverage(curve, mid, anchors)
+        if output_coverage_can_handoff_to_slope(curve, samples, mid, anchors):
+            high = mid
+        else:
+            low = mid
+    return high
 def estimate_default_max_input(mode, curve_type, cap_mode, args):
     fallback = estimate_heuristic_max_input(mode, curve_type, cap_mode, args)
     try:
         generator = CurveGenerator(mode_name=mode, curve_type=curve_type, cap_mode=cap_mode)
         curve = generator._build_curve(args)
-        anchors = {0.0}
-        if mode in ["classic/linear", "natural"]:
-            anchors.add(float(args.get("input_offset", 0.0)))
-        if mode == "jump":
-            anchors.add(float(args.get("cap_x", 15.0)))
-        if mode == "synchronous":
-            anchors.add(float(args.get("sync_speed", 5.0)))
-        if mode == "motivity (1.6.1)":
-            anchors.add(float(args.get("midpoint", 5.0)))
-        if mode == "power":
-            offset_bp = generator._power_offset_breakpoint(args)
-            if offset_bp is not None:
-                anchors.add(float(offset_bp))
-        cap_breakpoint = generator._special_breakpoint(args)
-        if cap_breakpoint is not None:
-            anchors.add(float(cap_breakpoint))
+        anchors = collect_curve_coverage_anchors(mode, generator, args)
         if mode == "lut":
-            points = parse_lookup_points(args.get("lookup_points", []))
-            anchors.update(float(x) for x, _ in points)
-
-        anchors = {
-            float(x)
-            for x in anchors
-            if math.isfinite(float(x)) and float(x) >= 0.0
-        }
-        anchor_max = max(anchors or {0.0})
-        lower_bound = max(30.0, anchor_max * 1.12, fallback * 0.05)
-        hard_max = min(max(fallback * 3.0, lower_bound * 3.0, 300.0), 5000.0)
-        if mode == "lut" and anchor_max > 0:
-            hard_max = min(max(anchor_max * 2.5, 200.0), 5000.0)
-
-        sample_x = {0.0, lower_bound, fallback, hard_max}
-        sample_x.update(anchors)
-        linear_count = 180
-        for i in range(linear_count):
-            t = i / max(1, linear_count - 1)
-            sample_x.add(hard_max * t)
-            sample_x.add(hard_max * (t ** 2.0))
-        log_start = max(1e-4, min(max(0.001, lower_bound / 1000.0), 1.0))
-        log_stop = max(hard_max, log_start * 2.0)
-        log_min = math.log(log_start)
-        log_max = math.log(log_stop)
-        for i in range(linear_count):
-            t = i / max(1, linear_count - 1)
-            sample_x.add(math.exp(log_min + (log_max - log_min) * t))
-
-        samples = []
-        for x in sorted(sample_x):
-            x = min(max(float(x), 0.0), hard_max)
-            if not math.isfinite(x):
-                continue
-            try:
-                y = float(curve(x))
-            except Exception:
-                continue
-            if math.isfinite(y):
-                samples.append((x, y))
-        if len(samples) < 8:
+            anchor_max = max(anchors or {0.0})
+            return anchor_max if anchor_max > 0.0 else fallback
+        anchor_max = required_curve_coverage_max_input(mode, cap_mode, args)
+        search_ceiling = auto_max_input_search_ceiling(fallback, anchor_max)
+        for start_x, end_x, _ in generator._exact_flat_segments(curve, search_ceiling):
+            if end_x >= search_ceiling and start_x > 0.0:
+                return max(start_x, anchor_max)
+        ceiling_samples = sample_curve_output_for_coverage(curve, search_ceiling, anchors, sample_count=256)
+        if len(ceiling_samples) >= 2:
+            ceiling_y = [y for _, y in ceiling_samples]
+            ceiling_span = max(ceiling_y) - min(ceiling_y)
+            ceiling_scale = max(ceiling_span, max(abs(y) for y in ceiling_y), 1.0)
+            ceiling_tolerance = max(ceiling_span * 0.006, ceiling_scale * 1e-5, 1e-8)
+            if ceiling_span <= ceiling_tolerance:
+                return min(max(fallback, anchor_max), search_ceiling)
+        practical_tail_start = find_practical_flat_tail_start(
+            curve,
+            anchors,
+            search_ceiling,
+            anchor_max,
+            precision=6
+        )
+        if practical_tail_start is not None:
+            return min(max(practical_tail_start, anchor_max), search_ceiling)
+        start = max(anchor_max * 1.05, 1.0)
+        previous = 0.0
+        current = min(start, search_ceiling)
+        stable_current = None
+        for _ in range(28):
+            samples = sample_curve_output_for_coverage(curve, current, anchors)
+            if output_coverage_can_handoff_to_slope(curve, samples, current, anchors) and current >= anchor_max:
+                stable_current = current
+                break
+            previous = current
+            if current >= search_ceiling:
+                break
+            current = min(current * 2.0, search_ceiling)
+        if stable_current is None:
             return fallback
-
-        y_values = [y for _, y in samples]
-        y_min = min(y_values)
-        y_max = max(y_values)
-        y_scale = max(y_max - y_min, max(abs(y) for y in y_values), 1.0)
-        tail_tolerance = max(y_scale * 0.012, 0.01)
-
-        best = None
-        for i, (x, y) in enumerate(samples):
-            if x < lower_bound:
-                continue
-            future = [fy for _, fy in samples[i:]]
-            if len(future) < 8:
-                break
-            future_range = max(future) - min(future)
-            if future_range <= tail_tolerance:
-                best = x
-                break
-
-        if best is None:
-            effective = generator._adaptive_effective_max_input(curve, fallback, precision=6)
-            if effective < fallback:
-                best = effective
-            else:
-                best = fallback
-
-        padded = best * 1.08 if best > 0 else fallback
-        min_reasonable = max(30.0, anchor_max * 1.04)
-        max_reasonable = max(fallback * 1.5, min_reasonable)
-        if best < fallback:
-            return max(min_reasonable, padded)
-        return min(max(padded, min_reasonable), max_reasonable)
+        refined = refine_output_coverage_end(curve, anchors, previous, stable_current)
+        return min(max(refined * 1.04, anchor_max), search_ceiling)
     except Exception:
         return fallback
 def format_setup_value(value):
@@ -4085,12 +4517,40 @@ def float_input_screen(title, label, current, minimum=0.0, maximum=None):
         except Exception:
             themed_number_error(" Invalid input. Enter a valid number (examples: 1.5, 2, 1/3, sqrt(1.5)).")
             input(f"\n{GRAY}Use ENTER to try again{RESET}")
+def custom_gain_summary(args):
+    ensure_custom_gain_arg_defaults(args)
+    return f"Gain Pull {format_setup_value(args['custom_gain_speed'])}"
+def custom_gain_settings_options(args):
+    ensure_custom_gain_arg_defaults(args)
+    return [
+        (f"Gain Pull [{format_setup_value(args['custom_gain_speed'])}]", "custom_gain_speed"),
+        ("Back", "back"),
+    ]
+def run_custom_gain_settings_menu(args):
+    ensure_custom_gain_arg_defaults(args)
+    labels = {
+        "custom_gain_speed": "Gain Pull",
+    }
+    while True:
+        choice = curve_setup_selector(
+            "CUSTOMGAIN SETTINGS",
+            custom_gain_settings_options(args),
+            note="Gain Pull 1 matches normal Gain. Lower is slower; higher pulls toward the cap/base without becoming flat."
+        )
+        if choice in ["menu", "back"]:
+            return args
+        if choice in labels:
+            label = labels[choice]
+            minimum, maximum = get_arg_limits(choice)
+            args[choice] = float_input_screen(label.upper(), label, args[choice], minimum=minimum, maximum=maximum)
 def setup_curve_options(mode, profile_name, curve_type, cap_mode, args):
     options = [
         (f"Profile Name [{profile_name}]", "profile_name"),
     ]
     if mode != "lut":
-        options.append((f"Mode Type [{curve_type.title()}]", "curve_type"))
+        options.append((f"Mode Type [{format_curve_type_label(curve_type)}]", "curve_type"))
+    if curve_type == "customgain":
+        options.append((f"CustomGain Settings [{custom_gain_summary(args)}]", "custom_gain_settings"))
     if mode in ["classic/linear", "power"]:
         cap_labels = {"out": "Output", "in": "Input", "io": "Both"}
         options.append((f"Cap Mode [{cap_labels.get(cap_mode, cap_mode)}]", "cap_mode"))
@@ -4150,15 +4610,15 @@ def setup_curve_options(mode, profile_name, curve_type, cap_mode, args):
     return options
 def run_curve_setup_menu(mode, last):
     profile_name = str(last.get("profile_name", "New Profile"))
-    curve_type = str(last.get("curve_type", "gain")).lower()
-    if curve_type not in ["legacy", "gain"]:
-        curve_type = "gain"
+    curve_type = normalize_curve_type(last.get("curve_type", "gain"))
     if mode == "lut":
         curve_type = "legacy"
     cap_mode = str(last.get("cap_mode", "out")).lower()
     if cap_mode not in ["out", "in", "io"]:
         cap_mode = "out"
     args = rawaccel_default_args(mode, cap_mode)
+    if curve_type == "customgain":
+        ensure_custom_gain_arg_defaults(args)
     last_args = last.get("args", {}) if isinstance(last.get("args"), dict) else {}
     for key in list(args.keys()):
         if key in last_args:
@@ -4172,6 +4632,8 @@ def run_curve_setup_menu(mode, last):
                     args[key] = safe_float(last_args[key], args[key], min_value, max_value)
             except Exception:
                 pass
+    if curve_type == "customgain":
+        ensure_custom_gain_arg_defaults(args)
     while True:
         choice = curve_setup_selector(
             f"{mode.upper()} CURVE CONFIGURATION",
@@ -4190,12 +4652,18 @@ def run_curve_setup_menu(mode, last):
                 continue
             picked = value_choice_selector(
                 "MODE TYPE",
-                [("Legacy", "legacy"), ("Gain", "gain")],
+                [("Legacy", "legacy"), ("Gain", "gain"), ("CustomGain", "customgain")],
                 current=curve_type,
                 width=70
             )
             if picked:
                 curve_type = picked
+                if curve_type == "customgain":
+                    ensure_custom_gain_arg_defaults(args)
+            continue
+        if choice == "custom_gain_settings":
+            if curve_type == "customgain":
+                run_custom_gain_settings_menu(args)
             continue
         if choice == "lut_mode":
             picked = value_choice_selector(
@@ -4218,6 +4686,8 @@ def run_curve_setup_menu(mode, last):
                 old_args = dict(args)
                 cap_mode = picked
                 args = rawaccel_default_args(mode, cap_mode)
+                if curve_type == "customgain":
+                    ensure_custom_gain_arg_defaults(args)
                 for key, value in old_args.items():
                     if key in args:
                         args[key] = value
@@ -4448,7 +4918,7 @@ def main():
         screen_header("GENERATING CURVE", 70)
         print(f"\n{BLUE}Profile:{RESET} {profile_name}")
         print(f"{BLUE}Mode:{RESET} {mode}")
-        print(f"{BLUE}Curve type:{RESET} {curve_type.title()}")
+        print(f"{BLUE}Curve type:{RESET} {format_curve_type_label(curve_type)}")
         print(f"{BLUE}Cap mode:{RESET} {cap_mode.upper()}")
         print(f"{BLUE}Output points:{RESET} {point_count}")
         print(f"{BLUE}Precision:{RESET} {precision}")
