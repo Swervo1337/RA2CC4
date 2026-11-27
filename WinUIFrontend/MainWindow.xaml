@@ -1,0 +1,346 @@
+<Window
+    x:Class="RA2CC4.WinUI.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="RA2CC4">
+    <NavigationView x:Name="AppNavigation" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}"
+                    PaneDisplayMode="Left" PaneTitle="RA2CC4" IsPaneToggleButtonVisible="False"
+                    IsBackButtonVisible="Collapsed" IsSettingsVisible="False" OpenPaneLength="220"
+                    SelectionChanged="NavigationSelectionChanged">
+      <NavigationView.Resources>
+        <StaticResource x:Key="NavigationViewDefaultPaneBackground" ResourceKey="SolidBackgroundFillColorBaseBrush" />
+        <DataTemplate x:Key="LookupPointTemplate">
+          <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" CornerRadius="6" Padding="14,10" Margin="0,3">
+            <Grid ColumnSpacing="16" VerticalAlignment="Center">
+              <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+              <StackPanel Spacing="3" VerticalAlignment="Center">
+                <TextBlock Text="{Binding DisplayX}" FontSize="15" FontWeight="SemiBold" />
+                <TextBlock Text="{Binding DisplayY}" FontSize="12" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button Content="Edit" Click="LookupPointEditClicked" Padding="12,6" MinWidth="64" />
+                <Button Click="LookupPointRemoveClicked" Padding="0" Width="36" Height="32"
+                        Background="#FFC62828" Foreground="White" BorderThickness="0"
+                        ToolTipService.ToolTip="Remove point" AutomationProperties.Name="Remove point">
+                  <SymbolIcon Symbol="Delete" />
+                </Button>
+              </StackPanel>
+            </Grid>
+          </Border>
+        </DataTemplate>
+      </NavigationView.Resources>
+      <NavigationView.MenuItems>
+        <NavigationViewItem Content="Home" Tag="home">
+          <NavigationViewItem.Icon><SymbolIcon Symbol="Home" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Generate curve" Tag="generate">
+          <NavigationViewItem.Icon><SymbolIcon Symbol="Edit" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="Import settings.json" Tag="import">
+          <NavigationViewItem.Icon><SymbolIcon Symbol="OpenFile" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="App settings" Tag="settings">
+          <NavigationViewItem.Icon><SymbolIcon Symbol="Setting" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+        <NavigationViewItem Content="About" Tag="about">
+          <NavigationViewItem.Icon><SymbolIcon Symbol="Help" /></NavigationViewItem.Icon>
+        </NavigationViewItem>
+      </NavigationView.MenuItems>
+      <NavigationView.Content>
+       <Grid>
+        <Grid x:Name="HomePage" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" Visibility="Visible">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="38,30" Spacing="20" MaxWidth="850" HorizontalAlignment="Left">
+              <Image Width="540" Height="108" HorizontalAlignment="Left" Stretch="Uniform">
+                <Image.Source><BitmapImage UriSource="ms-appx:///Assets/home.png" /></Image.Source>
+              </Image>
+              <StackPanel Spacing="5">
+                <TextBlock Text="RA2CC4" FontSize="12" FontWeight="SemiBold" CharacterSpacing="140" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                <TextBlock Text="Hi, thanks for using RA2CC4" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Build RawAccel curves for CustomCurve 4, import existing profiles, and tune each setting before saving or loading your curve." FontSize="15" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+              </StackPanel>
+              <Border x:Name="SetupRecommendation" Visibility="Collapsed" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource AccentFillColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                <StackPanel Spacing="10">
+                  <TextBlock Text="Finish setup" FontSize="18" FontWeight="SemiBold" />
+                  <TextBlock x:Name="SetupRecommendationText" TextWrapping="Wrap" />
+                  <Button Content="Open App Settings" Click="OpenAdvancedSettingsClicked" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Left" />
+                </StackPanel>
+              </Border>
+              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                <StackPanel Spacing="16">
+                  <TextBlock Text="Need help?" FontSize="18" FontWeight="SemiBold" />
+                  <TextBlock Text="For any issues, make a GitHub issue." TextWrapping="Wrap" />
+                  <HyperlinkButton Content="Open a GitHub issue" NavigateUri="https://github.com/Swervo1337/RA2CC4/issues/new" HorizontalAlignment="Left" />
+                  <StackPanel Orientation="Horizontal" Spacing="10" VerticalAlignment="Center">
+                    <Image Width="22" Height="22" VerticalAlignment="Center">
+                      <Image.Source><SvgImageSource UriSource="ms-appx:///Assets/discord.svg" /></Image.Source>
+                    </Image>
+                    <TextBlock Text="boraboraboraboraboraboraborabora" VerticalAlignment="Center" />
+                    <Border Width="28" Height="28" Margin="18,0,0,0" CornerRadius="14" Background="#24292f">
+                      <Image Width="16" Height="16" HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <Image.Source><SvgImageSource UriSource="ms-appx:///Assets/github-white.svg" /></Image.Source>
+                      </Image>
+                    </Border>
+                    <HyperlinkButton Content="Swervo1337" NavigateUri="https://github.com/Swervo1337" />
+                  </StackPanel>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+        <Grid x:Name="GeneratePage" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" Visibility="Collapsed">
+        <Grid.RowDefinitions><RowDefinition Height="*" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+        <ScrollViewer Grid.Row="0" Margin="38,30,38,10" VerticalScrollBarVisibility="Auto">
+            <StackPanel Spacing="20" MaxWidth="850" HorizontalAlignment="Left">
+                <StackPanel Spacing="5">
+                    <TextBlock Text="RAWACCEL  /  CUSTOMCURVE" FontSize="12" FontWeight="SemiBold" CharacterSpacing="140" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                    <TextBlock Text="Curve generator" FontSize="30" FontWeight="SemiBold" />
+                    <TextBlock Text="Shape your acceleration curve, then choose where to send it." FontSize="14" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                </StackPanel>
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                    <StackPanel Spacing="18">
+                      <StackPanel Spacing="3">
+                        <TextBlock Text="Curve setup" FontSize="18" FontWeight="SemiBold" />
+                        <TextBlock Text="Sens Multiplier scales output sensitivity; Y/X Ratio adds a vertical-only sensitivity factor." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                      </StackPanel>
+                    <Grid ColumnSpacing="14" RowSpacing="12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="130" /><ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="130" /><ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                        <TextBlock Text="Sens Multiplier" VerticalAlignment="Center" />
+                        <NumberBox x:Name="SensitivityMultiplierBox" Grid.Column="1" Value="1" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="120" HorizontalAlignment="Stretch" />
+                        <TextBlock Grid.Column="2" Text="Profile name" VerticalAlignment="Center" />
+                        <TextBox x:Name="ProfileNameBox" Grid.Column="3" Text="New Profile" />
+                        <TextBlock Grid.Row="1" Text="Y/X Ratio" VerticalAlignment="Center" />
+                        <NumberBox x:Name="YXRatioBox" Grid.Row="1" Grid.Column="1" Value="1" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="120" HorizontalAlignment="Stretch" />
+                        <TextBlock Grid.Row="1" Grid.Column="2" Text="Output destination" VerticalAlignment="Center" />
+                        <ComboBox x:Name="DestinationBox" Grid.Row="1" Grid.Column="3" SelectionChanged="DestinationChanged">
+                            <ComboBoxItem Content="Save as a file" Tag="file" /><ComboBoxItem Content="Load into CustomCurve" Tag="app" />
+                        </ComboBox>
+                        <CheckBox x:Name="OpenCustomCurveCheck" Grid.Row="2" Grid.Column="0" Grid.ColumnSpan="2" Content="Open CustomCurve after loading" IsEnabled="False" VerticalAlignment="Center" />
+                    </Grid>
+                    </StackPanel>
+                </Border>
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                  <StackPanel Spacing="16">
+                    <StackPanel Spacing="3">
+                      <TextBlock Text="Curve parameters" FontSize="18" FontWeight="SemiBold" />
+                      <TextBlock Text="Values available for the selected curve type." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+                    <Grid ColumnSpacing="12">
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                      <StackPanel x:Name="HorizontalCurvePanel" Spacing="12">
+                        <TextBlock Text="X component" FontWeight="SemiBold" />
+                        <Grid ColumnSpacing="10" RowSpacing="8">
+                          <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                          <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                          <TextBlock Text="Curve" VerticalAlignment="Center" />
+                          <ComboBox x:Name="ModeBox" Grid.Column="1" SelectionChanged="SettingsChanged">
+                            <ComboBoxItem Content="No acceleration" Tag="noaccel" /><ComboBoxItem Content="Natural" Tag="natural" /><ComboBoxItem Content="Classic / Linear" Tag="classic/linear" />
+                            <ComboBoxItem Content="Jump" Tag="jump" /><ComboBoxItem Content="Synchronous" Tag="synchronous" />
+                            <ComboBoxItem Content="Motivity (1.6.1)" Tag="motivity (1.6.1)" /><ComboBoxItem Content="Power" Tag="power" /><ComboBoxItem Content="Lookup table" Tag="lut" />
+                          </ComboBox>
+                          <StackPanel Grid.Row="1" Grid.Column="1">
+                            <CheckBox x:Name="GainCheck" Content="Gain" IsChecked="True" Checked="GainChanged" Unchecked="GainChanged" />
+                            <ComboBox x:Name="CurveTypeBox" Visibility="Collapsed" SelectionChanged="SettingsChanged">
+                              <ComboBoxItem Content="Legacy" Tag="legacy" /><ComboBoxItem Content="Gain" Tag="gain" />
+                            </ComboBox>
+                          </StackPanel>
+                          <ComboBox x:Name="CapModeBox" Visibility="Collapsed" SelectionChanged="SettingsChanged">
+                            <ComboBoxItem Content="Output" Tag="out" /><ComboBoxItem Content="Input" Tag="in" /><ComboBoxItem Content="Both" Tag="io" />
+                          </ComboBox>
+                        </Grid>
+                        <ItemsControl x:Name="FieldsList">
+                          <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Spacing="12" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                        </ItemsControl>
+                      </StackPanel>
+                      <Border x:Name="VerticalCurvePanel" Grid.Column="1" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="14" Visibility="Collapsed">
+                        <StackPanel Spacing="12">
+                          <TextBlock Text="Y component" FontWeight="SemiBold" />
+                          <Grid ColumnSpacing="10" RowSpacing="8">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                            <TextBlock Text="Curve" VerticalAlignment="Center" />
+                            <ComboBox x:Name="VerticalModeBox" Grid.Column="1" SelectionChanged="VerticalSettingsChanged">
+                              <ComboBoxItem Content="No acceleration" Tag="noaccel" /><ComboBoxItem Content="Natural" Tag="natural" />
+                              <ComboBoxItem Content="Classic / Linear" Tag="classic/linear" /><ComboBoxItem Content="Jump" Tag="jump" />
+                              <ComboBoxItem Content="Synchronous" Tag="synchronous" /><ComboBoxItem Content="Motivity (1.6.1)" Tag="motivity (1.6.1)" />
+                              <ComboBoxItem Content="Power" Tag="power" /><ComboBoxItem Content="Lookup table" Tag="lut" />
+                            </ComboBox>
+                            <StackPanel Grid.Row="1" Grid.Column="1">
+                              <CheckBox x:Name="VerticalGainCheck" Content="Gain" IsChecked="True" Checked="VerticalGainChanged" Unchecked="VerticalGainChanged" />
+                              <ComboBox x:Name="VerticalCurveTypeBox" Visibility="Collapsed" SelectionChanged="VerticalSettingsChanged">
+                                <ComboBoxItem Content="Legacy" Tag="legacy" /><ComboBoxItem Content="Gain" Tag="gain" />
+                              </ComboBox>
+                            </StackPanel>
+                            <ComboBox x:Name="VerticalCapModeBox" Visibility="Collapsed" SelectionChanged="VerticalSettingsChanged">
+                              <ComboBoxItem Content="Output" Tag="out" /><ComboBoxItem Content="Input" Tag="in" /><ComboBoxItem Content="Both" Tag="io" />
+                            </ComboBox>
+                          </Grid>
+                          <ItemsControl x:Name="VerticalFieldsList">
+                            <ItemsControl.ItemsPanel><ItemsPanelTemplate><StackPanel Spacing="12" /></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+                          </ItemsControl>
+                        </StackPanel>
+                      </Border>
+                    </Grid>
+                  </StackPanel>
+                </Border>
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                  <StackPanel Spacing="16">
+                    <StackPanel Spacing="8">
+                      <CheckBox x:Name="AnisotropyEnabledCheck" Content="Enable anisotropy" IsChecked="False" Checked="AnisotropyEnabledChanged" Unchecked="AnisotropyEnabledChanged" />
+                      <TextBlock Text="Stretch the input domain or acceleration range by axis." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                    <ContentControl x:Name="AnisotropyContent" IsEnabled="False">
+                    <Grid ColumnSpacing="18" RowSpacing="12">
+                      <Grid.ColumnDefinitions><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /><ColumnDefinition Width="130" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                      <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                      <TextBlock Text="Domain X" VerticalAlignment="Center" />
+                      <NumberBox x:Name="DomainXBox" Grid.Column="1" Value="1" Minimum="0.000000000001" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" ValueChanged="AnisotropyChanged" />
+                      <TextBlock Grid.Column="2" Text="Domain Y" VerticalAlignment="Center" />
+                      <NumberBox x:Name="DomainYBox" Grid.Column="3" Value="1" Minimum="0.000000000001" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" ValueChanged="AnisotropyChanged" />
+                      <TextBlock Grid.Row="1" Text="Range X" VerticalAlignment="Center" />
+                      <NumberBox x:Name="RangeXBox" Grid.Row="1" Grid.Column="1" Value="1" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" ValueChanged="AnisotropyChanged" />
+                      <TextBlock Grid.Row="1" Grid.Column="2" Text="Range Y" VerticalAlignment="Center" />
+                      <NumberBox x:Name="RangeYBox" Grid.Row="1" Grid.Column="3" Value="1" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" ValueChanged="AnisotropyChanged" />
+                    </Grid>
+                    </ContentControl>
+                      <CheckBox x:Name="SeparateVerticalCheck" Content="By component (edit separate X and Y curves)" Checked="SeparateVerticalChanged" Unchecked="SeparateVerticalChanged" />
+                    <TextBlock Text="Different Domain or Range values generate separate X and Y curves automatically. By component is optional and controls whether their curve parameters can differ." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                  </StackPanel>
+                </Border>
+                <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                <StackPanel Spacing="14">
+                  <StackPanel Spacing="3">
+                    <TextBlock Text="Advanced RawAccel settings" FontSize="18" FontWeight="SemiBold" />
+                    <TextBlock Text="These supported profile settings are copied when importing and written to generated CustomCurve profiles. Rotation uses Both mode; angle snapping uses Legacy mode." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                  </StackPanel>
+                  <Grid ColumnSpacing="12" RowSpacing="10">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /><ColumnDefinition Width="150" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <TextBlock Text="Rotation" VerticalAlignment="Center" />
+                    <NumberBox x:Name="RotationBox" Grid.Column="1" Value="0" Minimum="-1E+300" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" />
+                    <TextBlock Grid.Column="2" Text="Angle snap (both axes)" VerticalAlignment="Center" />
+                    <NumberBox x:Name="AngleSnapBox" Grid.Column="3" Value="0" Minimum="0" Maximum="360" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" />
+                    <TextBlock Grid.Row="1" Text="L/R sensitivity" VerticalAlignment="Center" />
+                    <NumberBox x:Name="LeftRightRatioBox" Grid.Row="1" Grid.Column="1" Value="1" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" />
+                    <TextBlock Grid.Row="1" Grid.Column="2" Text="U/D sensitivity" VerticalAlignment="Center" />
+                    <NumberBox x:Name="UpDownRatioBox" Grid.Row="1" Grid.Column="3" Value="1" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" />
+                    <TextBlock Grid.Row="2" Text="LP norm (p)" VerticalAlignment="Center" />
+                    <NumberBox x:Name="LpNormBox" Grid.Row="2" Grid.Column="1" Value="2" Minimum="0.000000000001" Maximum="16" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" />
+                    <CheckBox x:Name="OutputDpiEnabledCheck" Grid.Row="2" Grid.Column="2" Content="Set output DPI" VerticalAlignment="Center" Checked="OutputDpiEnabledChanged" Unchecked="OutputDpiEnabledChanged" />
+                    <NumberBox x:Name="OutputDpiBox" Grid.Row="2" Grid.Column="3" Value="1000" Minimum="1" Maximum="2147483647" SpinButtonPlacementMode="Inline" SmallChange="100" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" IsEnabled="False" />
+                    <TextBlock Grid.Row="3" Text="Input smoothing (ms)" VerticalAlignment="Center" />
+                    <NumberBox x:Name="InputSmoothingBox" Grid.Row="3" Grid.Column="1" Value="0" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" />
+                    <TextBlock Grid.Row="3" Grid.Column="2" Text="Output smoothing (ms)" VerticalAlignment="Center" />
+                    <NumberBox x:Name="OutputSmoothingBox" Grid.Row="3" Grid.Column="3" Value="0" Minimum="0" Maximum="1E+300" SpinButtonPlacementMode="Inline" SmallChange="0.1" ValidationMode="InvalidInputOverwritten" MinWidth="110" HorizontalAlignment="Stretch" />
+                    <TextBlock Grid.Row="4" Grid.Column="2" Grid.ColumnSpan="2" Text="When enabled, generated profiles use the mouse DPI and CustomCurve DPI settings are updated." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                  </Grid>
+                </StackPanel>
+              </Border>
+
+            </StackPanel>
+        </ScrollViewer>
+        <Grid Grid.Row="1" Margin="38,8,38,20" ColumnSpacing="16" MaxWidth="850" HorizontalAlignment="Left">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+            <TextBlock x:Name="StatusText" Text="Ready" VerticalAlignment="Center" Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextTrimming="CharacterEllipsis" />
+            <Button Grid.Column="1" Content="Generate profile" Click="GenerateClicked" Style="{StaticResource AccentButtonStyle}" MinWidth="160" />
+        </Grid>
+       </Grid>
+        <Grid x:Name="ImportPage" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" Visibility="Collapsed">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="38,30" Spacing="20" MaxWidth="850" HorizontalAlignment="Left">
+              <StackPanel Spacing="5">
+                <TextBlock Text="RAWACCEL  /  CUSTOMCURVE" FontSize="12" FontWeight="SemiBold" CharacterSpacing="140" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                <TextBlock Text="Import settings" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Load every profile from the configured RawAccel settings.json into CustomCurve." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              </StackPanel>
+              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="18">
+                <StackPanel Spacing="6">
+                  <TextBlock Text="Source settings.json" FontWeight="SemiBold" />
+                  <TextBlock Text="This follows the RawAccel folder in App Settings. Browse to another file for this session; that choice resets when the app restarts." Foreground="{ThemeResource TextFillColorSecondaryBrush}" TextWrapping="Wrap" />
+                </StackPanel>
+              </Border>
+              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                <StackPanel Spacing="16">
+                  <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBox x:Name="ImportPathBox" PlaceholderText="Set a RawAccel folder in App Settings" />
+                    <Button Grid.Column="1" Content="Browse" Click="BrowseImportClicked" />
+                  </Grid>
+                  <Button Content="Load all into CustomCurve" Click="ImportAllToAppClicked" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Left" MinWidth="220" />
+                </StackPanel>
+              </Border>
+              <TextBlock x:Name="ImportStatusText" Text="Ready" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+        <Grid x:Name="AdvancedPage" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" Visibility="Collapsed">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="38,30" Spacing="20" MaxWidth="850" HorizontalAlignment="Left">
+              <StackPanel Spacing="5">
+                <TextBlock Text="RAWACCEL  /  CUSTOMCURVE" FontSize="12" FontWeight="SemiBold" CharacterSpacing="140" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                <TextBlock Text="App settings" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Manage application paths and default output quality." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              </StackPanel>
+              
+              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                <StackPanel Spacing="16">
+                  <TextBlock Text="RawAccel folder (must contain settings.json)" />
+                  <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBox x:Name="RawAccelPathBox" PlaceholderText="Not set" />
+                    <Button Grid.Column="1" Content="Browse" Click="BrowseRawAccelClicked" />
+                  </Grid>
+                  <TextBlock Text="CustomCurve.exe" />
+                  <Grid ColumnSpacing="10"><Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                    <TextBox x:Name="CustomCurvePathBox" PlaceholderText="Not set" />
+                    <Button Grid.Column="1" Content="Browse" Click="BrowseCustomCurveClicked" />
+                  </Grid>
+                  <Grid ColumnSpacing="16"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="220" /><ColumnDefinition Width="Auto" /><ColumnDefinition Width="160" /></Grid.ColumnDefinitions>
+                    <TextBlock Text="Output points" VerticalAlignment="Center" />
+                    <ComboBox x:Name="SettingsPointCountBox" Grid.Column="1" />
+                    <TextBlock Grid.Column="2" Text="Precision" VerticalAlignment="Center" />
+                    <ComboBox x:Name="SettingsPrecisionBox" Grid.Column="3" />
+                  </Grid>
+                  <Button Content="Save settings" Click="SaveSettingsClicked" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Left" />
+                </StackPanel>
+              </Border>
+              <TextBlock x:Name="SettingsStatusText" Text="Ready" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+        <Grid x:Name="AboutPage" Background="{ThemeResource SolidBackgroundFillColorBaseBrush}" Visibility="Collapsed">
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="38,30" Spacing="20" MaxWidth="850" HorizontalAlignment="Left">
+              <StackPanel Spacing="5">
+                <TextBlock Text="CURVEGEN  /  RELEASE INFORMATION" FontSize="12" FontWeight="SemiBold" CharacterSpacing="140" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
+                <TextBlock Text="About RA2CC4" FontSize="30" FontWeight="SemiBold" />
+                <TextBlock Text="Application and CustomCurve compatibility details." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+              </StackPanel>
+              <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="10" Padding="24">
+                <StackPanel Spacing="18">
+                  <Grid ColumnSpacing="24" RowSpacing="18">
+                    <Grid.ColumnDefinitions><ColumnDefinition Width="240" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /><RowDefinition Height="Auto" /></Grid.RowDefinitions>
+                    <TextBlock Text="Application" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock Grid.Column="1" Text="RA2CC4 V2" FontSize="16" FontWeight="SemiBold" />
+                    <Border Grid.Row="1" Grid.ColumnSpan="2" Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" Margin="0,4" />
+                    <TextBlock Grid.Row="2" Text="Current update" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="CurrentUpdateText" Grid.Row="2" Grid.Column="1" Text="Update 26.11" FontSize="16" FontWeight="SemiBold" />
+                    <Border Grid.Row="3" Grid.ColumnSpan="2" Height="1" Background="{ThemeResource CardStrokeColorDefaultBrush}" Margin="0,4" />
+                    <TextBlock Grid.Row="4" Text="Compatible up to CC4" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    <TextBlock x:Name="CompatibleVersionText" Grid.Row="4" Grid.Column="1" Text="4.7.292" FontSize="16" FontWeight="SemiBold" />
+                  </Grid>
+                </StackPanel>
+              </Border>
+            </StackPanel>
+          </ScrollViewer>
+        </Grid>
+       </Grid>
+      </NavigationView.Content>
+    </NavigationView>
+</Window>
