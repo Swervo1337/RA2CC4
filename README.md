@@ -30,7 +30,7 @@ Close CustomCurve before loading a profile directly into it. RA2CC4 will warn yo
 
 ## Build from source
 
-On 64-bit Windows, run `build.bat` from this folder. It installs a per-user .NET 8 SDK if needed, restores dependencies, and creates the portable app and installer in `build`.
+On 64-bit Windows, run `build.bat` from this folder. It installs a per-user .NET 8 SDK if needed, restores dependencies, and creates the portable app and installer in the `Output` folder.
 
 The first build requires an internet connection. No Visual Studio installation is required.
 
