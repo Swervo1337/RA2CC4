@@ -1,10 +1,12 @@
-# RA2CC4
-
 ### Turn Raw Accel formulas into CustomCurve 4 profiles.
 
 Raw Accel describes acceleration with formulas. CustomCurve 4 builds curves from editable points. RA2CC4 bridges those two formats, fitting the formula to the CC4 spline so you can bring your Raw Accel curve into CustomCurve and keep editing it there.
 
 [Download the latest release](https://github.com/Swervo1337/RA2CC4/releases/latest)
+
+<p align="center">
+  <img src="https://github.com/user-attachments/assets/e8f376bd-890c-4c65-84e2-dc57072eb492" width="900" alt="RA2CC4 application screenshot">
+</p>
 
 ## Why use RA2CC4?
 
