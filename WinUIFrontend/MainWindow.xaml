@@ -258,7 +258,7 @@
               <StackPanel Spacing="5">
                 <TextBlock Text="RAWACCEL  /  CUSTOMCURVE" FontSize="12" FontWeight="SemiBold" CharacterSpacing="140" Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}" />
                 <TextBlock Text="Import settings" FontSize="30" FontWeight="SemiBold" />
-                <TextBlock Text="Load every profile from the configured RawAccel settings.json into CustomCurve." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                <TextBlock Text="Read a RawAccel settings file, select a profile, then edit or generate it." Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
               </StackPanel>
               <Border Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="8" Padding="18">
                 <StackPanel Spacing="6">
@@ -272,7 +272,20 @@
                     <TextBox x:Name="ImportPathBox" PlaceholderText="Set a RawAccel folder in App Settings" />
                     <Button Grid.Column="1" Content="Browse" Click="BrowseImportClicked" />
                   </Grid>
-                  <Button Content="Load all into CustomCurve" Click="ImportAllToAppClicked" Style="{StaticResource AccentButtonStyle}" HorizontalAlignment="Left" MinWidth="220" />
+                  <TextBlock Text="Profile" />
+                  <ComboBox x:Name="ImportProfileBox" PlaceholderText="Read settings.json to load profiles" />
+                  <StackPanel Orientation="Horizontal" Spacing="10">
+                    <Button Content="Read" Click="InspectSettingsClicked" />
+                    <Button Content="Edit" Click="ImportClicked" />
+                    <Button Content="Generate" Click="GenerateImportedClicked" Style="{StaticResource AccentButtonStyle}" />
+                  </StackPanel>
+                  <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="Auto" /><ColumnDefinition Width="220" /><ColumnDefinition Width="*" /></Grid.ColumnDefinitions>
+                    <TextBlock Text="Destination" VerticalAlignment="Center" />
+                    <ComboBox x:Name="ImportDestinationBox" Grid.Column="1">
+                      <ComboBoxItem Content="Save as a file" Tag="file" /><ComboBoxItem Content="Load into CustomCurve" Tag="app" />
+                    </ComboBox>
+                    <CheckBox x:Name="ImportOpenCustomCurveCheck" Grid.Column="2" Content="Open CustomCurve after loading" IsEnabled="False" VerticalAlignment="Center" />
+                  </Grid>
                 </StackPanel>
               </Border>
               <TextBlock x:Name="ImportStatusText" Text="Ready" TextWrapping="Wrap" Foreground="{ThemeResource TextFillColorSecondaryBrush}" />

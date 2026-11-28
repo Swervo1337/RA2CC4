@@ -111,6 +111,8 @@ public sealed partial class MainWindow : Window
         foreach (var point in new[] { 32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 640, 768, 1024, 2048, 4096 })
             SettingsPointCountBox.Items.Add(point.ToString());
         DestinationBox.SelectedIndex = 0;
+        ImportDestinationBox.SelectedIndex = 0;
+        ImportDestinationBox.SelectionChanged += ImportDestinationChanged;
         _draftSaveTimer.Tick += async (_, _) =>
         {
             _draftSaveTimer.Stop();
@@ -308,9 +310,13 @@ public sealed partial class MainWindow : Window
             RotationBox.Value = config.TryGetProperty("rotation", out var rotationValue) ? rotationValue.GetDouble() : 0;
             AngleSnapBox.Value = config.TryGetProperty("angle_snap", out var snapValue) ? snapValue.GetDouble() : 0;
             LpNormBox.Value = config.TryGetProperty("lp_norm", out var lpNormValue) ? lpNormValue.GetDouble() : 2;
-            OutputDpiEnabledCheck.IsChecked = config.TryGetProperty("output_dpi_enabled", out var outputDpiEnabled) && outputDpiEnabled.GetBoolean();
+            var outputDpiEnabled = config.TryGetProperty("output_dpi_enabled", out var outputDpiSetting) && outputDpiSetting.GetBoolean();
+            var customCurveRunning = IsCustomCurveRunning();
+            OutputDpiEnabledCheck.IsChecked = outputDpiEnabled && !customCurveRunning;
             OutputDpiBox.Value = config.TryGetProperty("output_dpi", out var outputDpi) ? outputDpi.GetDouble() : 1000;
             OutputDpiBox.IsEnabled = OutputDpiEnabledCheck.IsChecked == true;
+            if (outputDpiEnabled && customCurveRunning)
+                SettingsStatusText.Text = "Output DPI is disabled while CustomCurve is open.";
             InputSmoothingBox.Value = config.TryGetProperty("input_smoothing_ms", out var inputSmoothValue) ? inputSmoothValue.GetDouble() : 0;
             OutputSmoothingBox.Value = config.TryGetProperty("output_smoothing_ms", out var outputSmoothValue) ? outputSmoothValue.GetDouble() : 0;
             AnisotropyEnabledCheck.IsChecked = config.TryGetProperty("anisotropy_enabled", out var anisotropyValue) && anisotropyValue.GetBoolean();
@@ -976,8 +982,29 @@ public sealed partial class MainWindow : Window
 
     private void OutputDpiEnabledChanged(object sender, RoutedEventArgs e)
     {
+        if (_loading)
+        {
+            if (OutputDpiBox is not null) OutputDpiBox.IsEnabled = OutputDpiEnabledCheck.IsChecked == true;
+            return;
+        }
+        if (OutputDpiEnabledCheck.IsChecked == true && IsCustomCurveRunning())
+        {
+            _loading = true;
+            OutputDpiEnabledCheck.IsChecked = false;
+            _loading = false;
+            OutputDpiBox.IsEnabled = false;
+            ShowError("CustomCurve is open", "Close CustomCurve before enabling Output DPI.");
+            return;
+        }
         if (OutputDpiBox is not null) OutputDpiBox.IsEnabled = OutputDpiEnabledCheck.IsChecked == true;
         ScheduleDraftSave();
+    }
+
+    private static bool IsCustomCurveRunning()
+    {
+        var processes = Process.GetProcessesByName("CustomCurve");
+        foreach (var process in processes) process.Dispose();
+        return processes.Length > 0;
     }
 
     private async void SeparateVerticalChanged(object sender, RoutedEventArgs e)
@@ -1179,6 +1206,12 @@ public sealed partial class MainWindow : Window
         OpenCustomCurveCheck.IsEnabled = SelectedTag(DestinationBox) == "app";
     }
 
+    private void ImportDestinationChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (ImportOpenCustomCurveCheck is not null)
+            ImportOpenCustomCurveCheck.IsEnabled = SelectedTag(ImportDestinationBox) == "app";
+    }
+
     private async Task<StorageFolder?> PickFolderAsync(string title)
     {
         var picker = new FolderPicker { SuggestedStartLocation = PickerLocationId.DocumentsLibrary };
@@ -1196,6 +1229,7 @@ public sealed partial class MainWindow : Window
         if (file is not null)
         {
             ImportPathBox.Text = file.Path;
+            ImportProfileBox.Items.Clear();
             ImportStatusText.Text = "Using the selected settings.json for this session.";
         }
     }
@@ -1206,6 +1240,8 @@ public sealed partial class MainWindow : Window
         ImportPathBox.Text = string.IsNullOrWhiteSpace(RawAccelPathBox.Text)
             ? ""
             : Path.Combine(RawAccelPathBox.Text, "settings.json");
+        ImportProfileBox.Items.Clear();
+        ImportStatusText.Text = "Read settings.json to load its profiles.";
     }
 
     private async void BrowseRawAccelClicked(object sender, RoutedEventArgs e)
@@ -1249,39 +1285,134 @@ public sealed partial class MainWindow : Window
         }
     }
 
-    private async void ImportAllToAppClicked(object sender, RoutedEventArgs e) =>
-        await ImportAllProfilesAsync();
-
-    private async Task ImportAllProfilesAsync()
+    private async void InspectSettingsClicked(object sender, RoutedEventArgs e)
     {
         try
         {
             if (string.IsNullOrWhiteSpace(ImportPathBox.Text))
                 throw new InvalidOperationException("Set the RawAccel folder in App Settings or browse to a settings.json file.");
-            ImportStatusText.Text = "Loading RawAccel profiles into CustomCurve...";
+            ImportStatusText.Text = "Reading settings.json...";
             using var response = await CurveBackend.SendAsync(new
             {
-                action = "import_settings",
+                action = "inspect_settings",
                 settings_path = ImportPathBox.Text,
-                point_count = int.Parse(SettingsPointCountBox.SelectedItem?.ToString() ?? "128"),
-                precision = int.Parse(SettingsPrecisionBox.SelectedItem?.ToString() ?? "6"),
-                profile_name = "Imported Profile",
-                destination = "app",
-                output_dir = "",
-                open_customcurve = true,
-                output_dpi_enabled = OutputDpiEnabledCheck.IsChecked == true,
-                output_dpi = ReadNumberBoxValue(OutputDpiBox, "Output DPI"),
             });
-            var root = response.RootElement;
-            var count = root.GetProperty("count").GetInt32();
-            var path = root.TryGetProperty("path", out var pathElement) ? pathElement.GetString() : null;
-            ImportStatusText.Text = $"Loaded {count} profile(s) into CustomCurve. {path}";
+            ImportProfileBox.Items.Clear();
+            foreach (var profile in response.RootElement.GetProperty("profiles").EnumerateArray())
+            {
+                ImportProfileBox.Items.Add(new ComboBoxItem
+                {
+                    Content = profile.GetProperty("name").GetString() ?? "Unnamed profile",
+                    Tag = profile.GetProperty("index").GetInt32().ToString(CultureInfo.InvariantCulture),
+                });
+            }
+            if (ImportProfileBox.Items.Count > 0) ImportProfileBox.SelectedIndex = 0;
+            ImportStatusText.Text = $"Found {ImportProfileBox.Items.Count} profile(s).";
         }
         catch (Exception ex)
         {
-            ImportStatusText.Text = "Profiles were not loaded.";
-            ShowError("Could not load RawAccel profiles", ex.Message);
+            ImportStatusText.Text = "Could not read settings.json.";
+            ShowError("Could not read RawAccel settings", ex.Message);
         }
+    }
+
+    private async Task<JsonElement> LoadSelectedProfileGeneratorStateAsync()
+    {
+        if (ImportProfileBox.SelectedItem is not ComboBoxItem selected ||
+            !int.TryParse(selected.Tag?.ToString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var profileIndex))
+            throw new InvalidOperationException("Read settings.json and select a profile first.");
+        using var response = await CurveBackend.SendAsync(new
+        {
+            action = "load_settings_profile",
+            settings_path = ImportPathBox.Text,
+            profile_index = profileIndex,
+        });
+        return response.RootElement.GetProperty("generator_state").Clone();
+    }
+
+    private async void ImportClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            ImportStatusText.Text = "Loading selected profile into Generate curve...";
+            var state = await LoadSelectedProfileGeneratorStateAsync();
+            var name = (ImportProfileBox.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "profile";
+            await ApplyImportedGeneratorStateAsync(state);
+            ImportStatusText.Text = $"Loaded {name} into Generate curve. Review the settings before generating.";
+        }
+        catch (Exception ex)
+        {
+            ImportStatusText.Text = "Profile was not loaded.";
+            ShowError("Could not load RawAccel profile", ex.Message);
+        }
+    }
+
+    private async void GenerateImportedClicked(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            var state = await LoadSelectedProfileGeneratorStateAsync();
+            await ApplyImportedGeneratorStateAsync(state);
+            SetTag(DestinationBox, SelectedTag(ImportDestinationBox));
+            OpenCustomCurveCheck.IsChecked = ImportOpenCustomCurveCheck.IsChecked == true;
+            await GenerateProfileAsync();
+        }
+        catch (Exception ex)
+        {
+            ImportStatusText.Text = "Profile was not generated.";
+            ShowError("Could not generate RawAccel profile", ex.Message);
+        }
+    }
+
+    private async Task ApplyImportedGeneratorStateAsync(JsonElement state)
+    {
+        var horizontal = state.GetProperty("horizontal");
+        var vertical = state.GetProperty("vertical");
+        _loading = true;
+        ProfileNameBox.Text = state.TryGetProperty("profile_name", out var profileName)
+            ? profileName.GetString() ?? "Imported Profile" : "Imported Profile";
+        SelectTag(ModeBox, horizontal, "mode", "natural");
+        SelectTag(CurveTypeBox, horizontal, "curve_type", "gain");
+        GainCheck.IsChecked = SelectedTag(CurveTypeBox) == "gain";
+        SelectTag(CapModeBox, horizontal, "cap_mode", "out");
+        SelectTag(VerticalModeBox, vertical, "mode", "natural");
+        SelectTag(VerticalCurveTypeBox, vertical, "curve_type", "gain");
+        VerticalGainCheck.IsChecked = SelectedTag(VerticalCurveTypeBox) == "gain";
+        SelectTag(VerticalCapModeBox, vertical, "cap_mode", "out");
+        _lastArgs = JsonSerializer.Deserialize<Dictionary<string, object?>>(horizontal.GetProperty("args").GetRawText()) ?? new();
+        _lastVerticalArgs = JsonSerializer.Deserialize<Dictionary<string, object?>>(vertical.GetProperty("args").GetRawText()) ?? new();
+        DomainXBox.Value = state.GetProperty("domain_x").GetDouble();
+        DomainYBox.Value = state.GetProperty("domain_y").GetDouble();
+        RangeXBox.Value = state.GetProperty("range_x").GetDouble();
+        RangeYBox.Value = state.GetProperty("range_y").GetDouble();
+        SensitivityMultiplierBox.Value = state.TryGetProperty("sensitivity_multiplier", out var sensitivityValue)
+            ? sensitivityValue.GetDouble() : 1.0;
+        YXRatioBox.Value = state.TryGetProperty("yx_ratio", out var yxValue) ? yxValue.GetDouble() : 1.0;
+        LeftRightRatioBox.Value = state.TryGetProperty("left_right_ratio", out var lrValue) ? lrValue.GetDouble() : 1.0;
+        UpDownRatioBox.Value = state.TryGetProperty("up_down_ratio", out var udValue) ? udValue.GetDouble() : 1.0;
+        RotationBox.Value = state.TryGetProperty("rotation", out var rotationValue) ? rotationValue.GetDouble() : 0.0;
+        AngleSnapBox.Value = state.TryGetProperty("angle_snap", out var angleValue) ? angleValue.GetDouble() : 0.0;
+        LpNormBox.Value = state.TryGetProperty("lp_norm", out var lpValue) ? lpValue.GetDouble() : 2.0;
+        InputSmoothingBox.Value = state.TryGetProperty("input_smoothing_ms", out var inputSmoothValue) ? inputSmoothValue.GetDouble() : 0.0;
+        OutputSmoothingBox.Value = state.TryGetProperty("output_smoothing_ms", out var outputSmoothValue) ? outputSmoothValue.GetDouble() : 0.0;
+        AnisotropyEnabledCheck.IsChecked = state.TryGetProperty("anisotropy_enabled", out var anisotropyValue) && anisotropyValue.GetBoolean();
+        AnisotropyContent.IsEnabled = AnisotropyEnabledCheck.IsChecked == true;
+        SeparateVerticalCheck.IsChecked = state.TryGetProperty("by_component", out var componentValue) && componentValue.GetBoolean();
+        ForgetLookupPointEditors(_fields);
+        _fields.Clear();
+        ForgetLookupPointEditors(_verticalFields);
+        _verticalFields.Clear();
+        FieldsList.Items.Clear();
+        VerticalFieldsList.Items.Clear();
+        _loading = false;
+        SeparateVerticalCheck.IsEnabled = true;
+        UpdateModeOptionVisibility();
+        UpdateVerticalModeOptionVisibility();
+        UpdateSeparateCurveVisibility();
+        await RefreshFieldsAsync();
+        await RefreshVerticalFieldsAsync();
+        SelectPage("generate");
+        ScheduleDraftSave();
     }
 
     private static string MakeFileName(string name)

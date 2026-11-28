@@ -282,13 +282,13 @@ public static class CurveBackend
         var args=ReadArgs(mode,cap,Prop(r,"args"));
         var destination = Str(r, "destination", "file");
         var openCustomCurve = destination == "app" && Bool(r, "open_customcurve", false);
-        if (destination == "app") EnsureCustomCurveClosed();
+        var outputDpiEnabled = Bool(r, "output_dpi_enabled", false);
+        if (destination == "app" || outputDpiEnabled) EnsureCustomCurveClosed();
         var max=EstimateMaxInput(mode,type,cap,args,precision);
         progress?.Report(new GenerationProgress("Preparing curve", $"Formula: {mode} · {type} · cap {cap}; input range 0–{max:G6}"));
         var curve=MakeCurve(mode,type,cap,args,max,count,precision,progress,"Horizontal curve");
         var lr = Num(r,"left_right_ratio",1); var ud = Num(r,"up_down_ratio",1);
         var lpNorm = Num(r,"lp_norm",2);
-        var outputDpiEnabled = Bool(r, "output_dpi_enabled", false);
         var outputDpi = Num(r, "output_dpi", 1000);
         if (lr < 0 || ud < 0 || lpNorm <= 0 || lpNorm > 16) throw new InvalidOperationException("Directional multipliers must be nonnegative and LP norm must be between 0 and 16.");
         if (outputDpiEnabled && (!double.IsFinite(outputDpi) || outputDpi < 1 || outputDpi > int.MaxValue || outputDpi != Math.Truncate(outputDpi)))
@@ -866,7 +866,8 @@ public static class CurveBackend
         if (prefix.Length == 0) prefix = "Imported Profile";
         var destination = Str(request, "destination", "file");
         var openCustomCurve = destination == "app" && Bool(request, "open_customcurve", false);
-        if (destination == "app") EnsureCustomCurveClosed();
+        var outputDpiEnabled = Bool(request, "output_dpi_enabled", false);
+        if (destination == "app" || outputDpiEnabled) EnsureCustomCurveClosed();
         var profiles = new List<Dictionary<string, object?>>();
         foreach (var source in sources.EnumerateArray())
         {
@@ -875,7 +876,6 @@ public static class CurveBackend
             var name = sources.GetArrayLength() == 1 ? prefix : $"{prefix} - {sourceName}";
             profiles.Add(BuildRawAccelProfile(source, name, pointCount, precision));
         }
-        var outputDpiEnabled = Bool(request, "output_dpi_enabled", false);
         var outputDpi = Num(request, "output_dpi", 1000);
         if (outputDpiEnabled && (!double.IsFinite(outputDpi) || outputDpi < 1 || outputDpi > int.MaxValue || outputDpi != Math.Truncate(outputDpi)))
             throw new InvalidOperationException("Output DPI must be a positive whole number supported by CustomCurve.");
@@ -1453,7 +1453,7 @@ public static class CurveBackend
         var isRunning = running.Length > 0;
         foreach (var process in running) process.Dispose();
         if (isRunning)
-            throw new InvalidOperationException("CustomCurve is open. Close it before generating or importing directly into the app. Nothing was generated.");
+            throw new InvalidOperationException("CustomCurve is open. Close it before loading profiles or updating Output DPI. Nothing was generated.");
     }
 
     private static void ApplyCustomCurveOutputDpi(int dpi)
